@@ -18,23 +18,31 @@ pub fn save_entry(entry: Entry) -> Result<(), cosmic_config::Error> {
 }
 
 /// Get the context for cosmic-config
+/// TODO: Will be used for advanced configuration operations
+#[allow(dead_code)]
 pub fn get_context() -> Result<Context, cosmic_config::Error> {
     cosmic_bg_config::context()
 }
 
 /// Set whether all displays use the same wallpaper
+/// TODO: Will be used when implementing per-output vs all-outputs toggle UI
+#[allow(dead_code)]
 pub fn set_same_on_all(value: bool) -> Result<(), cosmic_config::Error> {
     let context = cosmic_bg_config::context()?;
     context.set_same_on_all(value)
 }
 
 /// Get the default entry for all displays
+/// TODO: Will be used when implementing output selection UI
+#[allow(dead_code)]
 pub fn get_default_entry() -> Result<Entry, cosmic_config::Error> {
     let context = cosmic_bg_config::context()?;
     Ok(context.default_background())
 }
 
 /// Get the entry for a specific output
+/// TODO: Will be used when implementing per-output configuration UI
+#[allow(dead_code)]
 pub fn get_entry(output: &str) -> Result<Option<Entry>, cosmic_config::Error> {
     let context = cosmic_bg_config::context()?;
     match context.entry(output) {
@@ -44,6 +52,8 @@ pub fn get_entry(output: &str) -> Result<Option<Entry>, cosmic_config::Error> {
 }
 
 /// Extract path from source if applicable
+/// TODO: Will be used for file path operations and validation
+#[allow(dead_code)]
 pub fn source_path(source: &Source) -> Option<&std::path::Path> {
     match source {
         Source::Path(p) => Some(p.as_path()),

@@ -123,6 +123,10 @@ impl Wallpaper {
     ///
     /// This preserves the image cache and only updates changed settings,
     /// avoiding unnecessary file I/O and memory allocations.
+    ///
+    /// Currently unused - wallpapers are recreated on config changes. This method
+    /// provides an optimization path for hot-reloading config without full teardown.
+    #[allow(dead_code)]
     pub fn update_config(&mut self, new_entry: Entry) {
         let rotation_changed = self.entry.rotation_frequency != new_entry.rotation_frequency;
         let scaling_changed = self.entry.scaling_mode != new_entry.scaling_mode;

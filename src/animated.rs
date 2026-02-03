@@ -355,6 +355,10 @@ enum AnimatedFormat {
 }
 
 /// Check if a file is an animated image
+///
+/// Utility function for detecting animated formats. Currently unused but provides
+/// format detection capability for future animation support in wallpaper loading.
+#[allow(dead_code)]
 pub fn is_animated_image(path: &PathBuf) -> bool {
     let ext = path
         .extension()

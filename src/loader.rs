@@ -4,6 +4,14 @@
 //!
 //! This module provides background loading of images to prevent blocking the
 //! Wayland event loop during directory scanning and image decoding operations.
+//!
+//! # Integration Status
+//!
+//! Fully implemented and tested but currently NOT integrated into the main event loop.
+//! Integration pending - requires adding loader to CosmicBg state and polling results
+//! from the calloop event loop. See module docs for usage examples.
+
+#![allow(dead_code)]
 
 use image::DynamicImage;
 use std::{

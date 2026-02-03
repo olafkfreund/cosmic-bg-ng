@@ -4,6 +4,13 @@
 //!
 //! This module provides timing coordination for animated wallpaper sources,
 //! ensuring smooth frame delivery synchronized with Wayland frame callbacks.
+//!
+//! # Integration Status
+//!
+//! Fully implemented and tested but not yet used. Will be integrated when animated
+//! wallpaper support is added to coordinate frame rendering across multiple outputs.
+
+#![allow(dead_code)]
 
 use std::{
     cmp::Ordering,

@@ -1,5 +1,13 @@
 // SPDX-License-Identifier: MPL-2.0
 
+//! Extensible wallpaper source trait and implementations.
+//!
+//! This module defines the WallpaperSource trait for pluggable background sources
+//! (static images, colors, animations, videos). Most types are not yet integrated
+//! but provide API for future extensibility.
+
+#![allow(dead_code)]
+
 use cosmic_bg_config::Color;
 use image::DynamicImage;
 use std::{

@@ -5,6 +5,14 @@
 //! This module provides a thread-safe least-recently-used (LRU) cache for
 //! decoded images, allowing multiple wallpapers to share the same image data
 //! when using the same source file.
+//!
+//! # Integration Status
+//!
+//! This module is fully implemented and tested but not yet integrated into the
+//! main wallpaper loading path. Integration is planned for future config updates
+//! to enable memory-efficient caching across multiple outputs using the same images.
+
+#![allow(dead_code)]
 
 use image::DynamicImage;
 use std::{

@@ -258,6 +258,10 @@ impl VideoSource {
     }
 
     /// Pause video playback
+    ///
+    /// Part of the video control API. Not yet exposed to config but available
+    /// for future interactive controls or power management integration.
+    #[allow(dead_code)]
     fn pause(&mut self) -> Result<(), SourceError> {
         if let Some(ref pipeline) = self.pipeline {
             pipeline

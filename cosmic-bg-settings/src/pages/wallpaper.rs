@@ -69,8 +69,8 @@ pub struct WallpaperPage {
     pub gradient_colors: Vec<[u8; 3]>,
     /// Gradient radius
     pub gradient_radius: f32,
-    /// Available outputs
-    pub available_outputs: Vec<String>,
+    /// Available outputs (reserved for future multi-display support)
+    pub _available_outputs: Vec<String>,
     /// Selected source type index for dropdown
     source_type_idx: usize,
     /// Selected scaling mode index for dropdown
@@ -100,7 +100,7 @@ impl Default for WallpaperPage {
             primary_color: [0, 0, 0],
             gradient_colors: vec![[0, 0, 128], [128, 0, 128]],
             gradient_radius: 0.5,
-            available_outputs: vec!["all".to_string()],
+            _available_outputs: vec!["all".to_string()],
             source_type_idx: 0,
             scaling_mode_idx: 0,
             shader_preset_idx: 0,

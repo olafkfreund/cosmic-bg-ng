@@ -3,7 +3,12 @@
 use std::path::PathBuf;
 
 /// Errors that can occur during wallpaper operations.
+///
+/// This enum provides comprehensive error variants for all wallpaper operations.
+/// Some variants are not currently used but are retained for complete API coverage
+/// and future functionality.
 #[derive(Debug, thiserror::Error)]
+#[allow(dead_code)]
 pub enum WallpaperError {
     /// Failed to bind a Wayland protocol.
     #[error("Failed to bind Wayland protocol {protocol}: {details}")]
@@ -62,4 +67,8 @@ pub enum WallpaperError {
 }
 
 /// Result type alias for wallpaper operations.
+///
+/// Provided for convenience but currently unused. Available for future error handling
+/// consistency across the codebase.
+#[allow(dead_code)]
 pub type Result<T> = std::result::Result<T, WallpaperError>;

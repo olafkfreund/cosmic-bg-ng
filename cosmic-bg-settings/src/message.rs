@@ -61,12 +61,16 @@ pub enum Message {
     ShaderPresetChanged(ShaderPreset),
 
     /// Custom shader path selected
+    // TODO: wire up custom shader file picker in future
+    #[allow(dead_code)]
     CustomShaderSelected(PathBuf),
 
     /// Color selected (RGB values 0-255)
     ColorSelected([u8; 3]),
 
     /// Gradient colors updated
+    // TODO: wire up gradient color picker in future
+    #[allow(dead_code)]
     GradientColorsChanged(Vec<[u8; 3]>),
 
     /// Gradient radius changed
@@ -100,6 +104,8 @@ pub enum Message {
     FilterByThemeChanged(bool),
 
     /// Output selection changed
+    // TODO: wire up output selection dropdown when multi-display support is added
+    #[allow(dead_code)]
     OutputSelected(String),
 
     /// Apply to all displays toggle changed
