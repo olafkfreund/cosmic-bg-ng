@@ -154,6 +154,68 @@ impl ShaderConfig {
     }
 }
 
+/// Video background configuration
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct VideoConfig {
+    /// Path to video file
+    pub path: PathBuf,
+    /// Whether to loop playback (default: true)
+    #[serde(default = "default_loop_playback")]
+    pub loop_playback: bool,
+    /// Playback speed multiplier (default: 1.0)
+    #[serde(default = "default_playback_speed")]
+    pub playback_speed: f64,
+    /// Enable hardware acceleration (default: true)
+    #[serde(default = "default_hw_accel")]
+    pub hw_accel: bool,
+}
+
+fn default_loop_playback() -> bool {
+    true
+}
+
+fn default_playback_speed() -> f64 {
+    1.0
+}
+
+fn default_hw_accel() -> bool {
+    true
+}
+
+impl Default for VideoConfig {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::new(),
+            loop_playback: true,
+            playback_speed: 1.0,
+            hw_accel: true,
+        }
+    }
+}
+
+/// Animated image background configuration
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+pub struct AnimatedConfig {
+    /// Path to animated image file (GIF, WebP, APNG)
+    pub path: PathBuf,
+    /// Optional FPS limit (None means use source FPS)
+    #[serde(default)]
+    pub fps_limit: Option<u32>,
+    /// Optional loop count (None means infinite)
+    #[serde(default)]
+    pub loop_count: Option<u32>,
+}
+
+impl Default for AnimatedConfig {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::new(),
+            fps_limit: None,
+            loop_count: None,
+        }
+    }
+}
+
 /// The source of a background image.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub enum Source {
@@ -163,6 +225,10 @@ pub enum Source {
     Color(Color),
     /// A GPU shader (procedural wallpaper)
     Shader(ShaderConfig),
+    /// A video background
+    Video(VideoConfig),
+    /// An animated image background (GIF, WebP, APNG)
+    Animated(AnimatedConfig),
 }
 
 impl Entry {

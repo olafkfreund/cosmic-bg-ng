@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::{CosmicBg, CosmicBgLayer};
+use crate::animated::AnimatedSource;
 use crate::shader::ShaderSource;
 use crate::source::WallpaperSource;
+use crate::video::VideoSource;
 
 use std::{
     collections::VecDeque,
@@ -49,7 +51,6 @@ pub enum DrawError {
     BufferCreation(#[from] CreateBufferError),
 }
 
-#[derive(Debug)]
 pub struct Wallpaper {
     pub entry: Entry,
     pub layers: Vec<CosmicBgLayer>,
@@ -60,11 +61,33 @@ pub struct Wallpaper {
     // Cache of source image, if `current_source` is a `Source::Path`
     current_image: Option<image::DynamicImage>,
     timer_token: Option<RegistrationToken>,
+    // Persistent animated source for videos/GIFs/shaders
+    animated_source: Option<Box<dyn WallpaperSource>>,
+    // Timer for animation frames
+    animation_timer_token: Option<RegistrationToken>,
+}
+
+impl std::fmt::Debug for Wallpaper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Wallpaper")
+            .field("entry", &self.entry)
+            .field("layers", &self.layers)
+            .field("image_queue", &self.image_queue)
+            .field("current_source", &self.current_source)
+            .field("current_image", &self.current_image.as_ref().map(|_| "<DynamicImage>"))
+            .field("timer_token", &self.timer_token)
+            .field("animated_source", &self.animated_source.as_ref().map(|s| s.description()))
+            .field("animation_timer_token", &self.animation_timer_token)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Drop for Wallpaper {
     fn drop(&mut self) {
         if let Some(token) = self.timer_token.take() {
+            self.loop_handle.remove(token);
+        }
+        if let Some(token) = self.animation_timer_token.take() {
             self.loop_handle.remove(token);
         }
     }
@@ -84,6 +107,8 @@ impl Wallpaper {
             current_image: None,
             image_queue: VecDeque::default(),
             timer_token: None,
+            animated_source: None,
+            animation_timer_token: None,
             loop_handle,
             queue_handle,
         };
@@ -117,6 +142,11 @@ impl Wallpaper {
         // If source changed, reload images (this will be called from apply_backgrounds)
         if source_changed {
             self.current_image = None;
+            // Clear animated source and timer
+            if let Some(token) = self.animation_timer_token.take() {
+                self.loop_handle.remove(token);
+            }
+            self.animated_source = None;
             self.load_images();
         }
 
@@ -250,26 +280,28 @@ impl Wallpaper {
             Source::Color(Color::Gradient(ref gradient)) => {
                 self.generate_gradient(gradient, width, height)
             }
-            Source::Shader(ref shader_config) => {
-                // Create shader source and render a frame
-                let mut shader_source = ShaderSource::new(shader_config.clone())
-                    .map_err(|e| DrawError::ImageDecode {
-                        path: PathBuf::from("shader"),
-                        reason: format!("Failed to create shader source: {}", e),
+            Source::Shader(_) | Source::Video(_) | Source::Animated(_) => {
+                // Use persistent animated source
+                let animated_source = self
+                    .animated_source
+                    .as_mut()
+                    .ok_or_else(|| DrawError::ImageDecode {
+                        path: PathBuf::from("animated"),
+                        reason: "Animated source not initialized".to_string(),
                     })?;
 
-                // Prepare the shader with target dimensions
-                shader_source.prepare(width, height)
+                // Prepare with target dimensions if needed
+                animated_source.prepare(width, height)
                     .map_err(|e| DrawError::ImageDecode {
-                        path: PathBuf::from("shader"),
-                        reason: format!("Failed to prepare shader: {}", e),
+                        path: PathBuf::from("animated"),
+                        reason: format!("Failed to prepare animated source: {}", e),
                     })?;
 
-                // Render the next frame
-                let frame = shader_source.next_frame()
+                // Get the next frame
+                let frame = animated_source.next_frame()
                     .map_err(|e| DrawError::ImageDecode {
-                        path: PathBuf::from("shader"),
-                        reason: format!("Failed to render shader frame: {}", e),
+                        path: PathBuf::from("animated"),
+                        reason: format!("Failed to get next frame: {}", e),
                     })?;
 
                 Ok(frame.image)
@@ -405,6 +437,62 @@ impl Wallpaper {
             Source::Shader(ref shader_config) => {
                 // Shader wallpapers don't have image queues
                 self.current_source = Some(Source::Shader(shader_config.clone()));
+
+                // Create persistent shader source
+                match ShaderSource::new(shader_config.clone()) {
+                    Ok(shader_source) => {
+                        self.animated_source = Some(Box::new(shader_source));
+                        self.setup_animation_timer();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to create shader source: {}", e);
+                    }
+                }
+            }
+
+            Source::Video(ref video_config) => {
+                // Video wallpapers don't have image queues
+                self.current_source = Some(Source::Video(video_config.clone()));
+
+                // Create persistent video source with converted config
+                let video_cfg = crate::video::VideoConfig {
+                    path: video_config.path.clone(),
+                    loop_playback: video_config.loop_playback,
+                    playback_speed: video_config.playback_speed,
+                    hw_accel: video_config.hw_accel,
+                };
+
+                match VideoSource::new(video_cfg) {
+                    Ok(video_source) => {
+                        self.animated_source = Some(Box::new(video_source));
+                        self.setup_animation_timer();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to create video source: {}", e);
+                    }
+                }
+            }
+
+            Source::Animated(ref animated_config) => {
+                // Animated wallpapers don't have image queues
+                self.current_source = Some(Source::Animated(animated_config.clone()));
+
+                // Create persistent animated source with converted config
+                let anim_cfg = crate::animated::AnimatedConfig {
+                    path: animated_config.path.clone(),
+                    fps_limit: animated_config.fps_limit,
+                    loop_count: animated_config.loop_count,
+                };
+
+                match AnimatedSource::new(anim_cfg) {
+                    Ok(animated_source) => {
+                        self.animated_source = Some(Box::new(animated_source));
+                        self.setup_animation_timer();
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to create animated source: {}", e);
+                    }
+                }
             }
         };
         if let Err(err) = self.save_state() {
@@ -440,6 +528,57 @@ impl Wallpaper {
                 let _ = watcher.watch(source, RecursiveMode::NonRecursive);
             }
         }
+    }
+
+    fn setup_animation_timer(&mut self) {
+        // Remove existing animation timer if present
+        if let Some(token) = self.animation_timer_token.take() {
+            self.loop_handle.remove(token);
+        }
+
+        // Get frame duration from the animated source
+        let frame_duration = self
+            .animated_source
+            .as_ref()
+            .map(|source| source.frame_duration())
+            .unwrap_or(Duration::from_millis(33)); // Default to ~30fps
+
+        let output = self.entry.output.clone();
+
+        // Register continuous animation timer
+        self.animation_timer_token = self
+            .loop_handle
+            .insert_source(
+                Timer::from_duration(frame_duration),
+                move |_, _, state: &mut CosmicBg| {
+                    let span = tracing::debug_span!("Wallpaper::animation_timer");
+                    let _handle = span.enter();
+
+                    let Some(item) = state
+                        .wallpapers
+                        .iter_mut()
+                        .find(|w| w.entry.output == output)
+                    else {
+                        return TimeoutAction::Drop; // Drop if no item found
+                    };
+
+                    // Trigger redraw for animated content
+                    for layer in &mut item.layers {
+                        layer.needs_redraw = true;
+                    }
+                    item.draw();
+
+                    // Get updated frame duration from source
+                    let next_duration = item
+                        .animated_source
+                        .as_ref()
+                        .map(|source| source.frame_duration())
+                        .unwrap_or(Duration::from_millis(33));
+
+                    TimeoutAction::ToDuration(next_duration)
+                },
+            )
+            .ok();
     }
 
     fn register_timer(&mut self) {

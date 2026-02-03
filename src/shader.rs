@@ -130,12 +130,16 @@ impl ShaderSource {
             "GPU adapter selected for shader wallpaper"
         );
 
-        // Create device and queue
+        // Create device and queue with limits that support high-resolution displays
+        let mut limits = wgpu::Limits::downlevel_defaults();
+        // Support 8K displays (7680x4320) - most GPUs can handle this
+        limits.max_texture_dimension_2d = 8192;
+
         let (device, queue) = pollster::block_on(adapter.request_device(
             &wgpu::DeviceDescriptor {
                 label: Some("cosmic-bg shader device"),
                 required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::downlevel_defaults(),
+                required_limits: limits,
                 memory_hints: wgpu::MemoryHints::Performance,
             },
             None,

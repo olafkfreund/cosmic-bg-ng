@@ -24,7 +24,7 @@
 
         pkgDef = {
           pname = "cosmic-bg-ng";
-          version = "1.0.0";
+          version = "1.1.0";
 
           src = nix-filter.lib.filter {
             root = ./.;
