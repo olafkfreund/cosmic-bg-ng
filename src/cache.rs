@@ -40,10 +40,6 @@ impl CacheEntry {
         // Assume 4 bytes per pixel (RGBA)
         width * height * 4
     }
-
-    fn touch(&mut self) {
-        self.last_access = Instant::now();
-    }
 }
 
 /// Configuration for the image cache
@@ -102,6 +98,13 @@ impl ImageCache {
         }
     }
 
+    /// Update cache statistics based on current entries
+    fn update_stats(&self, entries: &HashMap<PathBuf, CacheEntry>) {
+        let mut stats = self.stats.lock().unwrap();
+        stats.current_entries = entries.len();
+        stats.current_size_bytes = entries.values().map(|e| e.size_bytes).sum();
+    }
+
     /// Get an image from the cache, returning None if not cached
     pub fn get(&self, path: &PathBuf) -> Option<Arc<DynamicImage>> {
         // Try read lock first for better concurrency
@@ -136,9 +139,7 @@ impl ImageCache {
             entries.insert(path.clone(), entry);
 
             // Update stats
-            let mut stats = self.stats.lock().unwrap();
-            stats.current_entries = entries.len();
-            stats.current_size_bytes = entries.values().map(|e| e.size_bytes).sum();
+            self.update_stats(&entries);
         }
 
         tracing::trace!(
@@ -171,9 +172,7 @@ impl ImageCache {
         let removed = entries.remove(path).map(|e| e.image);
 
         if removed.is_some() {
-            let mut stats = self.stats.lock().unwrap();
-            stats.current_entries = entries.len();
-            stats.current_size_bytes = entries.values().map(|e| e.size_bytes).sum();
+            self.update_stats(&entries);
         }
 
         removed
@@ -185,9 +184,7 @@ impl ImageCache {
         let count = entries.len();
         entries.clear();
 
-        let mut stats = self.stats.lock().unwrap();
-        stats.current_entries = 0;
-        stats.current_size_bytes = 0;
+        self.update_stats(&entries);
 
         tracing::debug!(evicted = count, "Cache cleared");
     }

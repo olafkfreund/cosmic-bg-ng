@@ -126,20 +126,10 @@ impl FrameScheduler {
     ///
     /// Returns a vector of output names for frames that should be rendered now.
     pub fn pop_ready(&mut self) -> Vec<String> {
-        let now = Instant::now();
         let mut ready = Vec::new();
-
-        while let Some(frame) = self.queue.peek() {
-            if frame.deadline <= now {
-                if let Some(frame) = self.queue.pop() {
-                    tracing::trace!(output = %frame.output, "frame ready");
-                    ready.push(frame.output);
-                }
-            } else {
-                break;
-            }
+        while let Some(output) = self.pop_next_ready() {
+            ready.push(output);
         }
-
         ready
     }
 
@@ -161,11 +151,6 @@ impl FrameScheduler {
         None
     }
 
-    /// Returns true if there are frames scheduled.
-    pub fn has_scheduled(&self) -> bool {
-        !self.queue.is_empty()
-    }
-
     /// Returns the number of scheduled frames.
     pub fn len(&self) -> usize {
         self.queue.len()
@@ -183,6 +168,10 @@ impl FrameScheduler {
     }
 
     /// Remove all scheduled frames for a specific output.
+    ///
+    /// # Performance
+    /// This operation is O(n log n) due to heap reconstruction after filtering.
+    /// For frequent removals, consider tracking frames per output separately.
     pub fn remove_output(&mut self, output: &str) {
         let frames: Vec<_> = self.queue.drain().filter(|f| f.output != output).collect();
         self.queue = frames.into_iter().collect();

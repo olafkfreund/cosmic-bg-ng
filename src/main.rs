@@ -81,6 +81,9 @@ use tracing::error;
 use tracing_subscriber::prelude::*;
 use wallpaper::Wallpaper;
 
+/// Fractional scale protocol uses 120ths (120 = 1.0x scale)
+const FRACTIONAL_SCALE_MULTIPLIER: u32 = 120;
+
 #[derive(Debug)]
 pub struct CosmicBgLayer {
     layer: LayerSurface,
@@ -189,7 +192,6 @@ fn main() -> color_eyre::Result<()> {
                                 } else {
                                     state.config.load_backgrounds(&conf_context);
                                 }
-                                state.config.outputs.clear();
                                 changes_applied = true;
                             }
 
@@ -382,7 +384,7 @@ impl CosmicBg {
             None
         } else {
             (self.compositor_state.wl_compositor().version() < 6)
-                .then_some(output_info.scale_factor as u32 * 120)
+                .then_some(output_info.scale_factor as u32 * FRACTIONAL_SCALE_MULTIPLIER)
         };
 
         CosmicBgLayer {
@@ -414,7 +416,7 @@ impl CompositorHandler for CosmicBg {
                     .iter_mut()
                     .find(|layer| layer.layer.wl_surface() == surface)
                 {
-                    layer.fractional_scale = Some(new_factor as u32 * 120);
+                    layer.fractional_scale = Some(new_factor as u32 * FRACTIONAL_SCALE_MULTIPLIER);
                     wallpaper.draw();
                     break;
                 }
@@ -536,7 +538,7 @@ impl OutputHandler for CosmicBg {
                     .iter_mut()
                     .find(|layer| layer.wl_output == output)
                 {
-                    layer.fractional_scale = Some(output_info.scale_factor as u32 * 120);
+                    layer.fractional_scale = Some(output_info.scale_factor as u32 * FRACTIONAL_SCALE_MULTIPLIER);
                     wallpaper.draw();
                     break;
                 }

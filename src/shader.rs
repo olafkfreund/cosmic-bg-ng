@@ -20,6 +20,11 @@ mod presets {
     pub const GRADIENT: &str = include_str!("shaders/gradient.wgsl");
 }
 
+/// Helper to create GPU-related SourceError::Io instances
+fn gpu_error(kind: std::io::ErrorKind, msg: impl Into<String>) -> SourceError {
+    SourceError::Io(std::io::Error::new(kind, msg.into()))
+}
+
 /// Uniform buffer data for shaders
 #[repr(C)]
 #[derive(Debug, Copy, Clone, bytemuck::Pod, bytemuck::Zeroable)]
@@ -41,7 +46,6 @@ pub struct ShaderSource {
     output_buffer: Option<wgpu::Buffer>,
     target_size: Option<(u32, u32)>,
     start_time: Instant,
-    last_frame: Instant,
     shader_source: String,
     is_prepared: bool,
 }
@@ -63,7 +67,7 @@ impl ShaderSource {
         let shader_source = if let Some(ref path) = config.custom_path {
             Self::load_custom_shader(path)?
         } else if let Some(preset) = &config.preset {
-            Self::get_preset_shader(preset)
+            Self::get_preset_shader(preset).to_string()
         } else {
             // Default to gradient
             presets::GRADIENT.to_string()
@@ -80,7 +84,6 @@ impl ShaderSource {
             output_buffer: None,
             target_size: None,
             start_time: Instant::now(),
-            last_frame: Instant::now(),
             shader_source,
             is_prepared: false,
         })
@@ -89,19 +92,19 @@ impl ShaderSource {
     /// Load a custom shader from a file path
     fn load_custom_shader(path: &Path) -> Result<String, SourceError> {
         std::fs::read_to_string(path).map_err(|e| {
-            SourceError::Io(std::io::Error::new(
+            gpu_error(
                 std::io::ErrorKind::NotFound,
                 format!("Failed to load custom shader: {}", e),
-            ))
+            )
         })
     }
 
     /// Get the shader source for a preset
-    fn get_preset_shader(preset: &ShaderPreset) -> String {
+    fn get_preset_shader(preset: &ShaderPreset) -> &'static str {
         match preset {
-            ShaderPreset::Plasma => presets::PLASMA.to_string(),
-            ShaderPreset::Waves => presets::WAVES.to_string(),
-            ShaderPreset::Gradient => presets::GRADIENT.to_string(),
+            ShaderPreset::Plasma => presets::PLASMA,
+            ShaderPreset::Waves => presets::WAVES,
+            ShaderPreset::Gradient => presets::GRADIENT,
         }
     }
 
@@ -119,12 +122,7 @@ impl ShaderSource {
             compatible_surface: None,
             force_fallback_adapter: false,
         }))
-        .ok_or_else(|| {
-            SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                "No suitable GPU adapter found",
-            ))
-        })?;
+        .ok_or_else(|| gpu_error(std::io::ErrorKind::NotFound, "No suitable GPU adapter found"))?;
 
         tracing::info!(
             adapter = ?adapter.get_info().name,
@@ -142,12 +140,7 @@ impl ShaderSource {
             },
             None,
         ))
-        .map_err(|e| {
-            SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to create GPU device: {}", e),
-            ))
-        })?;
+        .map_err(|e| gpu_error(std::io::ErrorKind::Other, format!("Failed to create GPU device: {}", e)))?;
 
         // Create shader module
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -273,12 +266,10 @@ impl ShaderSource {
 
     /// Render a frame and return the image
     fn render_frame(&mut self) -> Result<DynamicImage, SourceError> {
-        let device = self.device.as_ref().ok_or_else(|| {
-            SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "GPU device not initialized",
-            ))
-        })?;
+        let device = self
+            .device
+            .as_ref()
+            .ok_or_else(|| gpu_error(std::io::ErrorKind::NotConnected, "GPU device not initialized"))?;
         let queue = self.queue.as_ref().unwrap();
         let pipeline = self.pipeline.as_ref().unwrap();
         let uniform_buffer = self.uniform_buffer.as_ref().unwrap();
@@ -361,12 +352,7 @@ impl ShaderSource {
         device.poll(wgpu::Maintain::Wait);
         rx.recv()
             .unwrap()
-            .map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Buffer map failed: {}", e),
-                ))
-            })?;
+            .map_err(|e| gpu_error(std::io::ErrorKind::Other, format!("Buffer map failed: {}", e)))?;
 
         let data = buffer_slice.get_mapped_range();
 
@@ -382,13 +368,8 @@ impl ShaderSource {
         output_buffer.unmap();
 
         // Create image from pixels
-        let img_buffer: ImageBuffer<Rgba<u8>, _> =
-            ImageBuffer::from_raw(width, height, pixels).ok_or_else(|| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "Failed to create image buffer",
-                ))
-            })?;
+        let img_buffer: ImageBuffer<Rgba<u8>, _> = ImageBuffer::from_raw(width, height, pixels)
+            .ok_or_else(|| gpu_error(std::io::ErrorKind::InvalidData, "Failed to create image buffer"))?;
 
         Ok(DynamicImage::ImageRgba8(img_buffer))
     }
@@ -397,14 +378,13 @@ impl ShaderSource {
 impl WallpaperSource for ShaderSource {
     fn next_frame(&mut self) -> Result<Frame, SourceError> {
         if !self.is_prepared {
-            return Err(SourceError::Io(std::io::Error::new(
+            return Err(gpu_error(
                 std::io::ErrorKind::NotConnected,
                 "Shader source not prepared",
-            )));
+            ));
         }
 
         let image = self.render_frame()?;
-        self.last_frame = Instant::now();
 
         Ok(Frame {
             image,
@@ -446,18 +426,11 @@ impl WallpaperSource for ShaderSource {
     }
 
     fn description(&self) -> String {
-        let preset_name = self
-            .config
-            .preset
-            .as_ref()
-            .map(|p| format!("{:?}", p))
-            .unwrap_or_else(|| "Custom".to_string());
-
-        format!(
-            "Shader: {} ({}fps)",
-            preset_name,
-            self.config.fps_limit
-        )
+        let name = match &self.config.preset {
+            Some(p) => format!("{:?}", p),
+            None => "Custom".to_string(),
+        };
+        format!("Shader: {} ({}fps)", name, self.config.fps_limit)
     }
 }
 

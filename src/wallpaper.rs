@@ -294,14 +294,19 @@ impl Wallpaper {
     fn decode_image(&self, path: &Path) -> Result<DynamicImage, DrawError> {
         match path.extension() {
             Some(ext) if ext == "jxl" => decode_jpegxl(path).map_err(DrawError::from),
-            _ => ImageReader::open(path)
-                .ok()
-                .and_then(|reader| reader.with_guessed_format().ok())
-                .and_then(|reader| reader.decode().ok())
-                .ok_or_else(|| DrawError::ImageDecode {
+            _ => {
+                let reader = ImageReader::open(path)
+                    .and_then(|r| r.with_guessed_format())
+                    .map_err(|e| DrawError::ImageDecode {
+                        path: path.to_path_buf(),
+                        reason: format!("failed to open image: {}", e),
+                    })?;
+
+                reader.decode().map_err(|e| DrawError::ImageDecode {
                     path: path.to_path_buf(),
-                    reason: "failed to open or decode image".to_string(),
-                }),
+                    reason: format!("failed to decode image: {}", e),
+                })
+            }
         }
     }
 
@@ -330,13 +335,9 @@ impl Wallpaper {
 
     pub fn load_images(&mut self) {
         let mut image_queue = VecDeque::new();
-        let xdg_data_dirs: Vec<String> = match std::env::var("XDG_DATA_DIRS") {
-            Ok(raw_xdg_data_dirs) => raw_xdg_data_dirs
-                .split(':')
-                .map(|s| format!("{}/backgrounds/", s))
-                .collect(),
-            Err(_) => Vec::new(),
-        };
+        let xdg_data_dirs: Vec<String> = std::env::var("XDG_DATA_DIRS")
+            .map(|dirs| dirs.split(':').map(|s| format!("{}/backgrounds/", s)).collect())
+            .unwrap_or_default();
 
         match self.entry.source {
             Source::Path(ref source) => {
@@ -385,15 +386,8 @@ impl Wallpaper {
 
                     // If a wallpaper from this slideshow was previously set, resume with that wallpaper.
                     if let Some(Source::Path(last_path)) = current_image(&self.entry.output) {
-                        if image_queue.contains(&last_path) {
-                            while let Some(path) = image_queue.pop_front() {
-                                if path == last_path {
-                                    image_queue.push_front(path);
-                                    break;
-                                }
-
-                                image_queue.push_back(path);
-                            }
+                        if let Some(pos) = image_queue.iter().position(|p| p == &last_path) {
+                            image_queue.rotate_left(pos);
                         }
                     }
                 }
@@ -450,7 +444,7 @@ impl Wallpaper {
 
     fn register_timer(&mut self) {
         let rotation_freq = self.entry.rotation_frequency;
-        let cosmic_bg_clone = self.entry.output.clone();
+        let output = self.entry.output.clone();
         // set timer for rotation
         if rotation_freq > 0 {
             self.timer_token = self
@@ -464,7 +458,7 @@ impl Wallpaper {
                         let Some(item) = state
                             .wallpapers
                             .iter_mut()
-                            .find(|w| w.entry.output == cosmic_bg_clone)
+                            .find(|w| w.entry.output == output)
                         else {
                             return TimeoutAction::Drop; // Drop if no item found for this timer
                         };
@@ -507,7 +501,7 @@ fn current_image(output: &str) -> Option<Source> {
     let wallpaper = if output == "all" {
         wallpapers.next()
     } else {
-        wallpapers.into_iter().find(|(name, _path)| name == output)
+        wallpapers.find(|(name, _path)| name == output)
     };
 
     wallpaper.map(|(_name, path)| path)

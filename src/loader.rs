@@ -184,14 +184,24 @@ impl AsyncImageLoader {
 
     /// Check if a path is a supported image file
     fn is_image_file(path: &std::path::Path) -> bool {
-        let Some(ext) = path.extension() else {
-            return false;
-        };
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|s| {
+                matches!(
+                    s.to_lowercase().as_str(),
+                    "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "jxl"
+                )
+            })
+            .unwrap_or(false)
+    }
 
-        matches!(
-            ext.to_str().map(|s| s.to_lowercase()).as_deref(),
-            Some("jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "tiff" | "jxl")
-        )
+    /// Create a load error result
+    fn load_error(output: &str, path: &PathBuf, msg: String) -> LoaderResult {
+        LoaderResult::LoadError {
+            output: output.to_string(),
+            path: Some(path.clone()),
+            error: msg,
+        }
     }
 
     /// Decode an image file
@@ -212,23 +222,11 @@ impl AsyncImageLoader {
                         path: path.clone(),
                         image: Box::new(image),
                     },
-                    Err(e) => LoaderResult::LoadError {
-                        output: output.to_string(),
-                        path: Some(path.clone()),
-                        error: format!("Decode error: {}", e),
-                    },
+                    Err(e) => Self::load_error(output, path, format!("Decode error: {}", e)),
                 },
-                Err(e) => LoaderResult::LoadError {
-                    output: output.to_string(),
-                    path: Some(path.clone()),
-                    error: format!("Format detection error: {}", e),
-                },
+                Err(e) => Self::load_error(output, path, format!("Format detection error: {}", e)),
             },
-            Err(e) => LoaderResult::LoadError {
-                output: output.to_string(),
-                path: Some(path.clone()),
-                error: format!("Open error: {}", e),
-            },
+            Err(e) => Self::load_error(output, path, format!("Open error: {}", e)),
         }
     }
 
@@ -239,24 +237,12 @@ impl AsyncImageLoader {
 
         let file = match File::open(path) {
             Ok(f) => f,
-            Err(e) => {
-                return LoaderResult::LoadError {
-                    output: output.to_string(),
-                    path: Some(path.clone()),
-                    error: format!("Failed to open JXL file: {}", e),
-                };
-            }
+            Err(e) => return Self::load_error(output, path, format!("Failed to open JXL file: {}", e)),
         };
 
         let decoder = match JxlDecoder::new(file) {
             Ok(d) => d,
-            Err(e) => {
-                return LoaderResult::LoadError {
-                    output: output.to_string(),
-                    path: Some(path.clone()),
-                    error: format!("Failed to create JXL decoder: {}", e),
-                };
-            }
+            Err(e) => return Self::load_error(output, path, format!("Failed to create JXL decoder: {}", e)),
         };
 
         match DynamicImage::from_decoder(decoder) {
@@ -265,11 +251,7 @@ impl AsyncImageLoader {
                 path: path.clone(),
                 image: Box::new(image),
             },
-            Err(e) => LoaderResult::LoadError {
-                output: output.to_string(),
-                path: Some(path.clone()),
-                error: format!("JXL decode error: {}", e),
-            },
+            Err(e) => Self::load_error(output, path, format!("JXL decode error: {}", e)),
         }
     }
 

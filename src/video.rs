@@ -11,6 +11,24 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Helper to convert GStreamer errors to SourceError
+fn gst_error(message: impl Into<String>) -> SourceError {
+    SourceError::Io(std::io::Error::new(std::io::ErrorKind::Other, message.into()))
+}
+
+/// Helper to create GStreamer elements
+fn create_element(name: &str) -> Result<gst::Element, SourceError> {
+    gst::ElementFactory::make(name)
+        .build()
+        .map_err(|e| gst_error(format!("Failed to create {}: {}", name, e)))
+}
+
+/// Helper to link multiple GStreamer elements
+fn link_elements(elements: &[&gst::Element]) -> Result<(), SourceError> {
+    gst::Element::link_many(elements)
+        .map_err(|e| gst_error(format!("Failed to link elements: {}", e)))
+}
+
 /// Video playback configuration
 ///
 /// Note: Audio is not supported for desktop wallpapers - only video frames are rendered.
@@ -54,12 +72,7 @@ impl VideoSource {
     /// Create a new video source from a configuration
     pub fn new(config: VideoConfig) -> Result<Self, SourceError> {
         // Initialize GStreamer if not already initialized
-        gst::init().map_err(|e| {
-            SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("GStreamer initialization failed: {}", e),
-            ))
-        })?;
+        gst::init().map_err(|e| gst_error(format!("GStreamer initialization failed: {}", e)))?;
 
         Ok(Self {
             config,
@@ -75,12 +88,7 @@ impl VideoSource {
 
     /// Build the GStreamer pipeline for video playback
     fn build_pipeline(&mut self, width: u32, height: u32) -> Result<(), SourceError> {
-        let path = self.config.path.to_str().ok_or_else(|| {
-            SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Invalid video path",
-            ))
-        })?;
+        let path = self.config.path.to_str().ok_or_else(|| gst_error("Invalid video path"))?;
 
         // Detect hardware acceleration capabilities
         let hw_decode = if self.config.hw_accel {
@@ -108,39 +116,11 @@ impl VideoSource {
         let filesrc = gst::ElementFactory::make("filesrc")
             .property("location", path)
             .build()
-            .map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create filesrc: {}", e),
-                ))
-            })?;
+            .map_err(|e| gst_error(format!("Failed to create filesrc: {}", e)))?;
 
-        let decodebin = gst::ElementFactory::make(decode_element)
-            .build()
-            .map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create decoder: {}", e),
-                ))
-            })?;
-
-        let videoconvert = gst::ElementFactory::make("videoconvert")
-            .build()
-            .map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create videoconvert: {}", e),
-                ))
-            })?;
-
-        let videoscale = gst::ElementFactory::make("videoscale")
-            .build()
-            .map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create videoscale: {}", e),
-                ))
-            })?;
+        let decodebin = create_element(decode_element)?;
+        let videoconvert = create_element("videoconvert")?;
+        let videoscale = create_element("videoscale")?;
 
         let appsink = gst_app::AppSink::builder()
             .name("sink")
@@ -160,29 +140,11 @@ impl VideoSource {
         // Add elements to pipeline
         pipeline
             .add_many([&filesrc, &decodebin, &videoconvert, &videoscale, appsink.upcast_ref()])
-            .map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to add elements to pipeline: {}", e),
-                ))
-            })?;
+            .map_err(|e| gst_error(format!("Failed to add elements to pipeline: {}", e)))?;
 
         // Link static elements
-        gst::Element::link_many([&filesrc, &decodebin])
-            .map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to link pipeline elements: {}", e),
-                ))
-            })?;
-
-        gst::Element::link_many([&videoconvert, &videoscale, appsink.upcast_ref()])
-            .map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to link pipeline elements: {}", e),
-                ))
-            })?;
+        link_elements(&[&filesrc, &decodebin])?;
+        link_elements(&[&videoconvert, &videoscale, appsink.upcast_ref()])?;
 
         // Handle dynamic pad linking from decodebin
         let videoconvert_weak = videoconvert.downgrade();
@@ -288,12 +250,7 @@ impl VideoSource {
         if let Some(ref pipeline) = self.pipeline {
             pipeline
                 .set_state(gst::State::Playing)
-                .map_err(|e| {
-                    SourceError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to start playback: {}", e),
-                    ))
-                })?;
+                .map_err(|e| gst_error(format!("Failed to start playback: {}", e)))?;
             self.is_playing = true;
             tracing::debug!("Video playback started");
         }
@@ -305,12 +262,7 @@ impl VideoSource {
         if let Some(ref pipeline) = self.pipeline {
             pipeline
                 .set_state(gst::State::Paused)
-                .map_err(|e| {
-                    SourceError::Io(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("Failed to pause playback: {}", e),
-                    ))
-                })?;
+                .map_err(|e| gst_error(format!("Failed to pause playback: {}", e)))?;
             self.is_playing = false;
             tracing::debug!("Video playback paused");
         }
@@ -323,30 +275,28 @@ impl VideoSource {
             return Ok(());
         }
 
-        if let Some(ref pipeline) = self.pipeline {
-            let bus = pipeline.bus().ok_or_else(|| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    "No bus available",
-                ))
-            })?;
+        let Some(ref pipeline) = self.pipeline else {
+            return Ok(());
+        };
 
-            // Check for EOS message (non-blocking)
-            if let Some(msg) = bus.pop_filtered(&[gst::MessageType::Eos]) {
-                match msg.view() {
-                    gst::MessageView::Eos(_) => {
-                        tracing::debug!("Video reached end, looping");
-                        // Seek back to start
-                        pipeline
-                            .seek_simple(
-                                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                                gst::ClockTime::from_seconds(0),
-                            )
-                            .ok();
-                    }
-                    _ => {}
-                }
-            }
+        let Some(bus) = pipeline.bus() else {
+            return Err(gst_error("No bus available"));
+        };
+
+        // Check for EOS message (non-blocking)
+        let Some(msg) = bus.pop_filtered(&[gst::MessageType::Eos]) else {
+            return Ok(());
+        };
+
+        if let gst::MessageView::Eos(_) = msg.view() {
+            tracing::debug!("Video reached end, looping");
+            // Seek back to start
+            pipeline
+                .seek_simple(
+                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                    gst::ClockTime::from_seconds(0),
+                )
+                .ok();
         }
 
         Ok(())
@@ -356,10 +306,7 @@ impl VideoSource {
 impl WallpaperSource for VideoSource {
     fn next_frame(&mut self) -> Result<Frame, SourceError> {
         if !self.is_prepared {
-            return Err(SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "Video source not prepared",
-            )));
+            return Err(gst_error("Video source not prepared"));
         }
 
         if !self.is_playing {

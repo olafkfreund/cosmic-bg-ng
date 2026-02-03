@@ -15,6 +15,21 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// Helper to create decode errors with context
+fn decode_error(context: &str, err: impl std::fmt::Display) -> SourceError {
+    SourceError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        format!("{}: {}", context, err),
+    ))
+}
+
+/// Helper to calculate frame delay from image::Delay
+fn calculate_frame_delay(delay: image::Delay) -> Duration {
+    let (numerator, denominator) = delay.numer_denom_ms();
+    let delay_ms = ((numerator as f64 / denominator as f64) as u64).max(10);
+    Duration::from_millis(delay_ms)
+}
+
 /// Configuration for animated image wallpapers
 #[derive(Debug, Clone)]
 pub struct AnimatedConfig {
@@ -103,21 +118,16 @@ impl AnimatedSource {
             .extension()
             .and_then(|e| e.to_str())
             .map(|e| e.to_lowercase())
-            .ok_or_else(|| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "No file extension",
-                ))
-            })?;
+            .ok_or_else(|| decode_error("No file extension", ""))?;
 
         match ext.as_str() {
             "gif" => Ok(AnimatedFormat::Gif),
             "apng" | "png" => Ok(AnimatedFormat::Apng),
             "webp" => Ok(AnimatedFormat::WebP),
-            _ => Err(SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                format!("Unsupported animated format: {}", ext),
-            ))),
+            _ => Err(decode_error(
+                "Unsupported animated format",
+                ext,
+            )),
         }
     }
 
@@ -126,25 +136,14 @@ impl AnimatedSource {
         let file = File::open(&self.config.path)?;
         let reader = BufReader::new(file);
 
-        let decoder = GifDecoder::new(reader).map_err(|e| {
-            SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to decode GIF: {}", e),
-            ))
-        })?;
+        let decoder = GifDecoder::new(reader)
+            .map_err(|e| decode_error("Failed to decode GIF", e))?;
 
         for frame_result in decoder.into_frames() {
-            let frame = frame_result.map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Failed to decode GIF frame: {}", e),
-                ))
-            })?;
+            let frame = frame_result
+                .map_err(|e| decode_error("Failed to decode GIF frame", e))?;
 
-            let (numerator, denominator) = frame.delay().numer_denom_ms();
-            let delay_ms = (numerator as f64 / denominator as f64) as u64;
-            let delay = Duration::from_millis(delay_ms.max(10)); // Minimum 10ms
-
+            let delay = calculate_frame_delay(frame.delay());
             let image = DynamicImage::ImageRgba8(frame.into_buffer());
 
             self.frames.push_back(AnimatedFrame { image, delay });
@@ -160,22 +159,14 @@ impl AnimatedSource {
         let file = File::open(&self.config.path)?;
         let reader = BufReader::new(file);
 
-        let decoder = PngDecoder::new(reader).map_err(|e| {
-            SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to decode PNG: {}", e),
-            ))
-        })?;
+        let decoder = PngDecoder::new(reader)
+            .map_err(|e| decode_error("Failed to decode PNG", e))?;
 
         // Check if it's actually animated
         if !decoder.is_apng().unwrap_or(false) {
             // Static PNG, load as single frame
-            let image = image::open(&self.config.path).map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Failed to decode image: {}", e),
-                ))
-            })?;
+            let image = image::open(&self.config.path)
+                .map_err(|e| decode_error("Failed to decode image", e))?;
 
             self.frames.push_back(AnimatedFrame {
                 image,
@@ -186,25 +177,14 @@ impl AnimatedSource {
         }
 
         // Load APNG frames
-        let apng_decoder = decoder.apng().map_err(|e| {
-            SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to create APNG decoder: {}", e),
-            ))
-        })?;
+        let apng_decoder = decoder.apng()
+            .map_err(|e| decode_error("Failed to create APNG decoder", e))?;
 
         for frame_result in apng_decoder.into_frames() {
-            let frame = frame_result.map_err(|e: image::ImageError| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Failed to decode APNG frame: {}", e),
-                ))
-            })?;
+            let frame = frame_result
+                .map_err(|e| decode_error("Failed to decode APNG frame", e))?;
 
-            let (numerator, denominator) = frame.delay().numer_denom_ms();
-            let delay_ms = (numerator as f64 / denominator as f64) as u64;
-            let delay = Duration::from_millis(delay_ms.max(10));
-
+            let delay = calculate_frame_delay(frame.delay());
             let image = DynamicImage::ImageRgba8(frame.into_buffer());
 
             self.frames.push_back(AnimatedFrame { image, delay });
@@ -220,22 +200,14 @@ impl AnimatedSource {
         let file = File::open(&self.config.path)?;
         let reader = BufReader::new(file);
 
-        let decoder = WebPDecoder::new(reader).map_err(|e| {
-            SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Failed to decode WebP: {}", e),
-            ))
-        })?;
+        let decoder = WebPDecoder::new(reader)
+            .map_err(|e| decode_error("Failed to decode WebP", e))?;
 
         // Check if it has animation
         if !decoder.has_animation() {
             // Static WebP, load as single frame
-            let image = image::open(&self.config.path).map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Failed to decode image: {}", e),
-                ))
-            })?;
+            let image = image::open(&self.config.path)
+                .map_err(|e| decode_error("Failed to decode image", e))?;
 
             self.frames.push_back(AnimatedFrame {
                 image,
@@ -247,17 +219,10 @@ impl AnimatedSource {
 
         // Load WebP frames
         for frame_result in decoder.into_frames() {
-            let frame = frame_result.map_err(|e| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Failed to decode WebP frame: {}", e),
-                ))
-            })?;
+            let frame = frame_result
+                .map_err(|e| decode_error("Failed to decode WebP frame", e))?;
 
-            let (numerator, denominator) = frame.delay().numer_denom_ms();
-            let delay_ms = (numerator as f64 / denominator as f64) as u64;
-            let delay = Duration::from_millis(delay_ms.max(10));
-
+            let delay = calculate_frame_delay(frame.delay());
             let image = DynamicImage::ImageRgba8(frame.into_buffer());
 
             self.frames.push_back(AnimatedFrame { image, delay });
@@ -310,10 +275,7 @@ impl AnimatedSource {
 impl WallpaperSource for AnimatedSource {
     fn next_frame(&mut self) -> Result<Frame, SourceError> {
         if !self.is_prepared {
-            return Err(SourceError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotConnected,
-                "Animated source not prepared",
-            )));
+            return Err(decode_error("Animated source not prepared", ""));
         }
 
         // Check if it's time to advance
@@ -326,12 +288,7 @@ impl WallpaperSource for AnimatedSource {
         let frame = self
             .frames
             .get(self.current_frame_idx)
-            .ok_or_else(|| {
-                SourceError::Io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    "No frames available",
-                ))
-            })?;
+            .ok_or_else(|| decode_error("No frames available", ""))?;
 
         Ok(Frame {
             image: frame.image.clone(),
