@@ -12,14 +12,14 @@ use std::{
 };
 
 /// Video playback configuration
+///
+/// Note: Audio is not supported for desktop wallpapers - only video frames are rendered.
 #[derive(Debug, Clone)]
 pub struct VideoConfig {
     /// Path to the video file
     pub path: PathBuf,
     /// Whether to loop playback
     pub loop_playback: bool,
-    /// Whether to mute audio (default: true)
-    pub mute_audio: bool,
     /// Playback speed multiplier (1.0 = normal)
     pub playback_speed: f64,
     /// Whether to use hardware acceleration
@@ -31,7 +31,6 @@ impl Default for VideoConfig {
         Self {
             path: PathBuf::new(),
             loop_playback: true,
-            mute_audio: true,
             playback_speed: 1.0,
             hw_accel: true,
         }
@@ -455,7 +454,6 @@ mod tests {
     fn test_video_config_defaults() {
         let config = VideoConfig::default();
         assert!(config.loop_playback);
-        assert!(config.mute_audio);
         assert_eq!(config.playback_speed, 1.0);
         assert!(config.hw_accel);
     }

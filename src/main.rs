@@ -81,21 +81,6 @@ use tracing::error;
 use tracing_subscriber::prelude::*;
 use wallpaper::Wallpaper;
 
-/// Represents specific configuration changes to enable differential updates
-#[derive(Debug, Clone, PartialEq)]
-enum ConfigChange {
-    /// The wallpaper source (path or color) changed
-    SourceChanged(String),
-    /// The scaling mode changed
-    ScalingModeChanged(String),
-    /// The rotation frequency changed
-    RotationFrequencyChanged(String),
-    /// The filter method changed
-    FilterMethodChanged(String),
-    /// The sampling method changed
-    SamplingMethodChanged(String),
-}
-
 #[derive(Debug)]
 pub struct CosmicBgLayer {
     layer: LayerSurface,

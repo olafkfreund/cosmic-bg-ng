@@ -11,8 +11,7 @@ cosmic-bg now supports video wallpapers with hardware acceleration support via G
 ### Components
 
 1. **VideoSource** (`src/video.rs`): Implements the `WallpaperSource` trait for video playback
-2. **VideoConfig** (`config/src/lib.rs`): Configuration structure for video settings
-3. **Source::Video** variant: New enum variant in the `Source` type
+2. **VideoConfig** (`src/video.rs`): Internal configuration structure for video settings (not yet exposed in cosmic-bg-config)
 
 ### Hardware Acceleration
 
@@ -26,7 +25,13 @@ The detection happens at pipeline build time and is logged for debugging purpose
 
 ## Configuration
 
-### VideoConfig Structure
+### Current Status
+
+**Integration with cosmic-bg-config is pending.** The video wallpaper implementation exists in `src/video.rs` but is not yet exposed as a `Source::Video` variant in `config/src/lib.rs`. The configuration shown below represents the planned/internal API structure.
+
+### VideoConfig Structure (Internal API)
+
+The following configuration structure exists in `src/video.rs`:
 
 ```rust
 pub struct VideoConfig {
@@ -36,9 +41,6 @@ pub struct VideoConfig {
     /// Whether to loop playback (default: true)
     pub loop_playback: bool,
 
-    /// Whether to mute audio (default: true)
-    pub mute_audio: bool,
-
     /// Playback speed multiplier (default: 1.0)
     pub playback_speed: f64,
 
@@ -47,9 +49,11 @@ pub struct VideoConfig {
 }
 ```
 
-### Configuration Example
+**Note:** Audio is not supported for desktop wallpapers - only video frames are rendered.
 
-Using cosmic-config to set a video wallpaper:
+### Planned Configuration Example
+
+Once integrated with cosmic-config, setting a video wallpaper will look like:
 
 ```ron
 Entry(
@@ -57,7 +61,6 @@ Entry(
     source: Video(VideoConfig(
         path: "/home/user/Videos/wallpaper.mp4",
         loop_playback: true,
-        mute_audio: true,
         playback_speed: 1.0,
         hw_accel: true,
     )),
@@ -66,18 +69,34 @@ Entry(
 )
 ```
 
-## Features
+### Integration TODO
 
-### Implemented
+To expose video wallpapers to cosmic-config:
 
-- [x] GStreamer-based video playback
-- [x] Hardware acceleration detection (VA-API, NVDEC)
-- [x] Frame extraction to RGBA format
-- [x] Automatic looping
-- [x] Audio muting (enabled by default)
-- [x] Playback speed control
-- [x] Integration with WallpaperSource trait
-- [x] Proper resource cleanup on drop
+1. Add `Source::Video(VideoConfig)` variant to `config/src/lib.rs` enum (line 159)
+2. Update `VideoConfig` in `src/video.rs` to derive `Serialize` and `Deserialize`
+3. Integrate `VideoSource` into the wallpaper loading logic in `src/wallpaper.rs`
+4. Update UI components in cosmic-settings to support video source selection
+
+## Implementation Status
+
+### Current State
+
+The video wallpaper **core implementation is complete** in `src/video.rs` with full GStreamer integration, hardware acceleration support, and frame extraction. However, **cosmic-config integration is pending** - the `Source::Video` variant does not yet exist in `config/src/lib.rs`, so video wallpapers cannot currently be configured through the COSMIC settings UI.
+
+### What Works Now
+
+The `VideoSource` implementation in `src/video.rs` provides:
+
+- GStreamer-based video playback
+- Hardware acceleration detection (VA-API, NVDEC)
+- Frame extraction to RGBA format
+- Automatic looping
+- Playback speed control
+- Integration with WallpaperSource trait
+- Proper resource cleanup on drop
+
+**Note:** Audio is intentionally not supported - video wallpapers are rendered as silent visual backgrounds only.
 
 ### Performance
 

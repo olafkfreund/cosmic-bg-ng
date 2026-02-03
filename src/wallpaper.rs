@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MPL-2.0
 
 use crate::{CosmicBg, CosmicBgLayer};
+use crate::shader::ShaderSource;
+use crate::source::WallpaperSource;
 
 use std::{
     collections::VecDeque,
@@ -228,7 +230,7 @@ impl Wallpaper {
         layer: &CosmicBgLayer,
     ) -> Result<(u32, u32), DrawError> {
         let fractional_scale = layer.fractional_scale.ok_or(DrawError::NoSource)?;
-        let (base_width, base_height) = layer.size.ok_or(DrawError::NoSource)?;
+        let (base_width, base_height) = layer.effective_size().ok_or(DrawError::NoSource)?;
 
         let width = base_width * fractional_scale / 120;
         let height = base_height * fractional_scale / 120;
@@ -248,11 +250,29 @@ impl Wallpaper {
             Source::Color(Color::Gradient(ref gradient)) => {
                 self.generate_gradient(gradient, width, height)
             }
-            Source::Shader(_shader_config) => {
-                // Shader wallpapers are not yet implemented
-                // For now, return a solid black image as placeholder
-                tracing::warn!("Shader wallpapers not yet implemented, using black placeholder");
-                Ok(self.generate_solid_color([0.0, 0.0, 0.0], width, height))
+            Source::Shader(ref shader_config) => {
+                // Create shader source and render a frame
+                let mut shader_source = ShaderSource::new(shader_config.clone())
+                    .map_err(|e| DrawError::ImageDecode {
+                        path: PathBuf::from("shader"),
+                        reason: format!("Failed to create shader source: {}", e),
+                    })?;
+
+                // Prepare the shader with target dimensions
+                shader_source.prepare(width, height)
+                    .map_err(|e| DrawError::ImageDecode {
+                        path: PathBuf::from("shader"),
+                        reason: format!("Failed to prepare shader: {}", e),
+                    })?;
+
+                // Render the next frame
+                let frame = shader_source.next_frame()
+                    .map_err(|e| DrawError::ImageDecode {
+                        path: PathBuf::from("shader"),
+                        reason: format!("Failed to render shader frame: {}", e),
+                    })?;
+
+                Ok(frame.image)
             }
         }
     }

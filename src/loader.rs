@@ -74,6 +74,26 @@ impl Default for LoadingState {
 }
 
 /// Asynchronous image loader with worker thread
+///
+/// # Implementation Status
+///
+/// This loader is **fully implemented and tested** with complete functionality for:
+/// - Directory scanning (recursive and non-recursive)
+/// - Image decoding (including JPEG XL support)
+/// - Background worker thread management
+/// - Clean shutdown handling
+///
+/// # Integration Status
+///
+/// **Currently NOT integrated into the main wallpaper loading path.**
+///
+/// The loader is used for background operations only. Integration into the main
+/// `calloop` event loop is pending. This will require:
+/// 1. Adding the loader to `CosmicBg` state
+/// 2. Integrating result polling into the event loop
+/// 3. Updating `wallpaper.rs` to use async loading instead of blocking calls
+///
+/// See tests at the end of this file for usage examples.
 pub struct AsyncImageLoader {
     /// Sender for commands to worker thread
     command_tx: mpsc::Sender<LoaderCommand>,
@@ -274,12 +294,6 @@ impl AsyncImageLoader {
             results.push(result);
         }
         results
-    }
-
-    /// Check if there are pending results
-    pub fn has_pending_results(&self) -> bool {
-        // Note: This is a peek operation, actual results retrieved via poll_results
-        !self.result_rx.try_iter().peekable().peek().is_none()
     }
 }
 

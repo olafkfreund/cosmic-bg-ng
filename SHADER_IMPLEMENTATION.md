@@ -91,12 +91,12 @@ pub struct ShaderConfig {
 pub enum Source {
     Path(PathBuf),
     Color(Color),
-    Video(VideoConfig),
     Shader(ShaderConfig),  // NEW
 }
 ```
 
-**Validation:**
+**Notes:**
+- Video support planned but not yet implemented in Source enum
 - `ShaderConfig::is_valid()` ensures either preset OR custom_path is set
 
 ### 4. Module Registration (src/main.rs)
@@ -110,31 +110,35 @@ Added `mod shader;` declaration alongside existing modules.
 ```
 cosmic-bg-ng
 ├── Wallpaper (wallpaper.rs)
-│   └── uses WallpaperSource trait
-│       ├── StaticSource (images)
-│       ├── ColorSource (colors/gradients)
-│       ├── VideoSource (videos via gstreamer)
-│       └── ShaderSource (GPU shaders) ← NEW
+│   └── Source enum variants
+│       ├── Path (static images)
+│       ├── Color (colors/gradients)
+│       └── Shader (GPU shaders) ← NEW
 ```
 
-### Rendering Flow
+**Note:** The WallpaperSource trait abstraction for pluggable backends is designed but not yet fully integrated. Current implementation uses direct Source enum matching in wallpaper.rs.
 
-1. **Initialization:**
+### Rendering Flow (Designed)
+
+**Current Status:** ShaderSource implementation complete but integration pending.
+
+1. **Initialization (planned):**
    - User configures `Source::Shader(config)` in cosmic-config
-   - Wallpaper creates ShaderSource via async constructor
+   - Wallpaper detects shader source and creates ShaderSource via async constructor
    - GPU device/queue/pipeline initialized
 
-2. **Frame Rendering:**
-   - `next_frame()` called by wallpaper timer
-   - Update uniforms with current time
-   - Render fullscreen triangle to texture
-   - Copy texture to CPU buffer via mapping
-   - Return as `DynamicImage`
+2. **Frame Rendering (implemented in shader.rs):**
+   - `next_frame()` updates uniforms with current time
+   - Renders fullscreen triangle to texture via wgpu
+   - Copies texture to CPU buffer via mapping
+   - Returns as `DynamicImage`
 
-3. **Display:**
-   - Existing draw.rs converts to XRGB8888/XRGB2101010
+3. **Display (existing infrastructure):**
+   - draw.rs converts to XRGB8888/XRGB2101010
    - Written to wl_shm buffer
    - Attached to layer-shell surface
+
+**Integration TODO:** Wire ShaderSource into wallpaper.rs Source::Shader match arm
 
 ### Performance Characteristics
 

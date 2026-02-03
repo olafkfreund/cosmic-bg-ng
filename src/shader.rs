@@ -414,7 +414,8 @@ impl WallpaperSource for ShaderSource {
 
     fn frame_duration(&self) -> Duration {
         let fps = self.config.fps_limit.max(1);
-        Duration::from_secs_f64(1.0 / fps as f64)
+        let millis_per_frame = 1000u64 / fps as u64;
+        Duration::from_millis(millis_per_frame)
     }
 
     fn is_animated(&self) -> bool {

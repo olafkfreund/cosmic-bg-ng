@@ -1,10 +1,12 @@
 # cosmic-bg
 
-COSMIC session service which applies backgrounds to displays. A comprehensive Wayland background daemon for the COSMIC Desktop Environment (System76) with support for static, animated, video, and shader-based wallpapers.
+COSMIC session service which applies backgrounds to displays. A Wayland background daemon for the COSMIC Desktop Environment (System76) with support for static wallpapers, colors/gradients, and GPU shader-based backgrounds.
 
 ## Features
 
-### Static Wallpapers
+### Implemented Features
+
+#### Static Wallpapers
 - Supports common image formats via [image-rs](https://github.com/image-rs/image#supported-image-formats)
 - JPEG XL support via jxl-oxide
 - 8-bit and 10-bit (HDR) surface rendering
@@ -13,29 +15,38 @@ COSMIC session service which applies backgrounds to displays. A comprehensive Wa
 - Wallpaper slideshows with periodic rotation
 - Shared image cache for memory efficiency
 
-### Live Wallpapers
-- **Animated Images**: GIF, APNG, and animated WebP with proper frame timing
-- **Video Wallpapers**: MP4, WebM with GStreamer backend
-  - Hardware-accelerated decoding (VA-API, NVDEC)
-  - Loop playback and speed control
-  - Audio muting (default)
+#### GPU Shaders (Work in Progress)
 - **GPU Shaders**: Procedural animations using wgpu
   - Built-in presets: Plasma, Waves, Gradient
   - Custom WGSL shader support
   - FPS limiting for battery savings
+  - **Note**: Shader configuration is defined but integration is still in development
 
-### Performance
+#### Performance
 - Asynchronous image loading (non-blocking I/O)
 - Differential config updates (no full rebuild on changes)
 - Frame timing synchronized with Wayland frame callbacks
 - LRU image cache with configurable size
 - Power-aware rendering for battery systems
 
-### Display Features
+#### Display Features
 - HDR/10-bit display detection and rendering
 - Output transform handling (90/180/270 degree rotation)
 - Fractional scaling support
 - Multi-monitor configurations
+
+### Planned Features
+
+#### Animated Wallpapers (Not Yet Implemented)
+- **Animated Images**: GIF, APNG, and animated WebP with proper frame timing
+- Currently only static frames from animated formats are displayed
+
+#### Video Wallpapers (Not Yet Implemented)
+- **Video Wallpapers**: MP4, WebM with GStreamer backend
+  - Hardware-accelerated decoding (VA-API, NVDEC)
+  - Loop playback and speed control
+  - Audio muting (default)
+- Configuration types and backend code are planned but not yet integrated
 
 ## Dependencies
 
@@ -49,13 +60,15 @@ Developers should install Rust from https://rustup.rs/.
 - mold
 - pkg-config
 
-### Optional Dependencies (for live wallpapers)
-- **GStreamer** (for video wallpapers):
+### Planned Optional Dependencies (for future features)
+These will be needed when live wallpaper features are implemented:
+
+- **GStreamer** (for video wallpapers - planned):
   - libgstreamer1.0-dev
   - libgstreamer-plugins-base1.0-dev
   - gstreamer1.0-plugins-good
   - gstreamer1.0-plugins-bad (for hardware acceleration)
-- **wgpu** (for shader wallpapers): GPU with Vulkan, Metal, or DX12 support
+- **wgpu** (for shader wallpapers - work in progress): GPU with Vulkan, Metal, or DX12 support
 
 ## Installation
 
@@ -79,8 +92,33 @@ Configuration is stored via cosmic-config at `com.system76.CosmicBackground` (ve
 )
 ```
 
-### Animated Image
+### Color or Gradient Background
 ```ron
+(
+    output: "all",
+    source: Color(Single([0.2, 0.4, 0.8])),  // RGB values 0.0-1.0
+    scaling_mode: Zoom,
+)
+```
+
+### GPU Shader (Work in Progress)
+```ron
+(
+    output: "all",
+    source: Shader(
+        preset: Some(Plasma),
+        custom_path: None,
+        fps_limit: 30,
+    ),
+)
+```
+
+**Note**: The `Shader` source type is defined in configuration but shader rendering integration is still under development.
+
+<!--
+### Animated Image (Not Yet Implemented)
+Animation and Video source types are planned but not yet available in the Source enum.
+Future syntax may look like:
 (
     output: "all",
     source: Animation(
@@ -88,10 +126,8 @@ Configuration is stored via cosmic-config at `com.system76.CosmicBackground` (ve
         fps_limit: Some(30),
     ),
 )
-```
 
-### Video Wallpaper
-```ron
+### Video Wallpaper (Not Yet Implemented)
 (
     output: "all",
     source: Video(
@@ -101,18 +137,7 @@ Configuration is stored via cosmic-config at `com.system76.CosmicBackground` (ve
         hw_accel: true,
     ),
 )
-```
-
-### GPU Shader
-```ron
-(
-    output: "all",
-    source: Shader(
-        preset: Plasma,
-        fps_limit: 30,
-    ),
-)
-```
+-->
 
 ## Debugging
 
@@ -128,22 +153,32 @@ RUST_LOG=cosmic_bg=trace just run
 
 ## Architecture
 
+### Current Structure
 ```
 src/
 ├── main.rs          # Event loop, Wayland handlers, config watching
 ├── wallpaper.rs     # Wallpaper management and rendering
-├── source.rs        # WallpaperSource trait and implementations
-├── animated.rs      # Animated image support (GIF, APNG, WebP)
-├── video.rs         # Video playback with GStreamer
-├── shader.rs        # GPU shader wallpapers with wgpu
-├── cache.rs         # Shared LRU image cache
-├── loader.rs        # Async image loading
-├── scheduler.rs     # Frame timing and scheduling
 ├── scaler.rs        # Image scaling (Fit, Zoom, Stretch)
 ├── draw.rs          # Buffer management and HDR rendering
 ├── colored.rs       # Solid colors and gradients
-├── error.rs         # Error types
-└── shaders/         # Built-in WGSL shader presets
+├── img_source.rs    # Filesystem watching for wallpaper directories
+config/
+├── lib.rs           # Configuration types (Entry, Source enum, etc.)
+└── state.rs         # Persistent state for slideshow rotation
+```
+
+### Planned Components (Not Yet Implemented)
+```
+src/
+├── source.rs        # WallpaperSource trait and implementations (planned)
+├── animated.rs      # Animated image support - GIF, APNG, WebP (planned)
+├── video.rs         # Video playback with GStreamer (planned)
+├── shader.rs        # GPU shader wallpapers with wgpu (in progress)
+├── cache.rs         # Shared LRU image cache (planned)
+├── loader.rs        # Async image loading (planned)
+├── scheduler.rs     # Frame timing and scheduling (planned)
+├── error.rs         # Error types (planned)
+└── shaders/         # Built-in WGSL shader presets (planned)
     ├── plasma.wgsl
     ├── waves.wgsl
     └── gradient.wgsl
