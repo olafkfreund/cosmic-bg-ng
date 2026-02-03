@@ -124,6 +124,7 @@
             '';
             installPhase = ''
               just prefix=$out install
+              just prefix=$out install-ctl
             '';
           });
           cosmic-bg-ng = self.packages.${system}.default;
