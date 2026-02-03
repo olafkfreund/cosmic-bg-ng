@@ -5,6 +5,7 @@ mod draw;
 mod error;
 mod img_source;
 mod scaler;
+mod scheduler;
 mod source;
 mod video;
 mod wallpaper;
