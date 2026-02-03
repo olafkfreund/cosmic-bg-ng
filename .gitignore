@@ -24,3 +24,8 @@ debian/*
 !debian/links
 !debian/rules
 !debian/source
+
+# Generated shell completions
+cosmic-bg-ctl.bash
+_cosmic-bg-ctl
+cosmic-bg-ctl.fish

@@ -47,6 +47,95 @@ COSMIC session service which applies backgrounds to displays. A next-generation 
 - **Graceful Degradation**: Fallback to solid color on image load failures
 - **Comprehensive Logging**: `tracing` instrumentation at info/debug/trace levels
 
+## Tools
+
+### cosmic-bg-ctl (CLI)
+
+Command-line tool for managing wallpapers without editing config files directly.
+
+```bash
+# Set a static wallpaper
+cosmic-bg-ctl set /path/to/image.png
+cosmic-bg-ctl set /path/to/wallpapers/ -r 300  # Slideshow, rotate every 5 min
+
+# Set a video wallpaper
+cosmic-bg-ctl video /path/to/video.mp4 --loop --speed 1.5
+
+# Set an animated wallpaper
+cosmic-bg-ctl animated /path/to/animation.gif --fps 30
+
+# Set a GPU shader wallpaper
+cosmic-bg-ctl shader Plasma --fps 60
+cosmic-bg-ctl shader /path/to/custom.wgsl
+
+# Set a solid color or gradient
+cosmic-bg-ctl color "#1a1b26"
+cosmic-bg-ctl color "#1a1b26" --gradient-colors "#24283b" "#414868" --radius 0.5
+
+# Query current configuration
+cosmic-bg-ctl query
+cosmic-bg-ctl query -o DP-1
+
+# List configured outputs
+cosmic-bg-ctl outputs
+
+# Backup and restore
+cosmic-bg-ctl backup -f ~/my-wallpaper-config.ron
+cosmic-bg-ctl restore -f ~/my-wallpaper-config.ron
+
+# Generate shell completions
+cosmic-bg-ctl completions bash > ~/.local/share/bash-completion/completions/cosmic-bg-ctl
+cosmic-bg-ctl completions zsh > ~/.zsh/completions/_cosmic-bg-ctl
+cosmic-bg-ctl completions fish > ~/.config/fish/completions/cosmic-bg-ctl.fish
+```
+
+#### CLI Commands Reference
+
+| Command | Description |
+|---------|-------------|
+| `set <path>` | Set static image wallpaper (file or directory for slideshow) |
+| `video <path>` | Set video wallpaper with loop/speed options |
+| `animated <path>` | Set animated image wallpaper (GIF, WebP, APNG) |
+| `shader <preset\|path>` | Set GPU shader (Plasma, Waves, Gradient, or custom .wgsl) |
+| `color <hex>` | Set solid color or gradient wallpaper |
+| `query` | Show current wallpaper configuration |
+| `outputs` | List configured display outputs |
+| `backup` | Save configuration to file |
+| `restore` | Load configuration from file |
+| `completions <shell>` | Generate shell completions (bash, zsh, fish) |
+
+#### CLI Options
+
+| Option | Commands | Description |
+|--------|----------|-------------|
+| `-o, --output` | all | Target specific display (e.g., DP-1, HDMI-A-1) |
+| `-s, --scaling` | set | Scaling mode: zoom, fit, stretch |
+| `-r, --rotation` | set | Slideshow rotation frequency in seconds |
+| `--loop` | video | Enable loop playback |
+| `--speed` | video | Playback speed multiplier |
+| `--no-hw-accel` | video | Disable hardware acceleration |
+| `--fps` | animated, shader | FPS limit |
+| `--loops` | animated | Loop count (omit for infinite) |
+
+### cosmic-bg-settings (GUI)
+
+Graphical application for configuring wallpapers with live preview.
+
+```bash
+# Run the settings app
+cosmic-bg-settings
+
+# Or via justfile
+just run-settings
+```
+
+Features:
+- Source type selector (Static, Video, Animated, Shader, Color, Gradient)
+- XDG file picker dialog for selecting files
+- Scaling mode dropdown
+- Per-display configuration toggle
+- Real-time config updates via cosmic-config
+
 ## Module Reference
 
 | Module | Description | Lines |
@@ -88,14 +177,64 @@ nix build    # Build the package
 ## Installation
 
 ```bash
-# Build release
+# Build all binaries (service + CLI)
 just
 
-# Install system-wide
+# Build everything including GUI
+just build-all
+
+# Install service only
 sudo just install
+
+# Install CLI tool
+sudo just install-ctl
+
+# Install settings GUI (with desktop entry)
+sudo just install-settings
+
+# Install everything
+sudo just install-all
 
 # Package installation (e.g., for Debian)
 just rootdir=debian/cosmic-bg prefix=/usr install
+```
+
+### Nix Installation
+
+```bash
+# Build default package (service + CLI)
+nix build
+
+# Build specific package
+nix build .#cosmic-bg-ctl
+nix build .#cosmic-bg-settings
+
+# Run directly
+nix run .#cosmic-bg-ctl -- --help
+nix run .#cosmic-bg-settings
+
+# Add to NixOS configuration
+{
+  inputs.cosmic-bg-ng.url = "github:olafkfreund/cosmic-bg-ng";
+}
+
+# In configuration.nix
+{ inputs, ... }: {
+  imports = [ inputs.cosmic-bg-ng.nixosModules.default ];
+  services.cosmic-bg.enable = true;
+}
+```
+
+### Shell Completions
+
+```bash
+# Generate completions
+just completions
+
+# Or manually install
+cosmic-bg-ctl completions bash > ~/.local/share/bash-completion/completions/cosmic-bg-ctl
+cosmic-bg-ctl completions zsh > ~/.zsh/completions/_cosmic-bg-ctl
+cosmic-bg-ctl completions fish > ~/.config/fish/completions/cosmic-bg-ctl.fish
 ```
 
 ## Configuration
@@ -169,7 +308,7 @@ Configuration is stored via cosmic-config at `com.system76.CosmicBackground` (ve
 ## Architecture
 
 ```
-cosmic-bg/
+cosmic-bg-ng/
 ├── src/
 │   ├── main.rs          # Event loop, Wayland handlers, config watching
 │   ├── wallpaper.rs     # Wallpaper state and rendering coordination
@@ -185,41 +324,63 @@ cosmic-bg/
 │   ├── animated.rs      # Animated image support
 │   ├── video.rs         # Video wallpaper support
 │   ├── shader.rs        # GPU shader support
-│   └── shaders/         # Built-in WGSL presets
-│       ├── plasma.wgsl
-│       ├── waves.wgsl
-│       └── gradient.wgsl
+│   ├── shaders/         # Built-in WGSL presets
+│   │   ├── plasma.wgsl
+│   │   ├── waves.wgsl
+│   │   └── gradient.wgsl
+│   └── bin/
+│       └── cosmic-bg-ctl.rs  # CLI tool for wallpaper management
 ├── config/
 │   ├── lib.rs           # Configuration types (Entry, Source, ShaderConfig)
 │   └── state.rs         # Persistent state for slideshow position
+├── cosmic-bg-settings/  # GUI application (libcosmic)
+│   ├── src/
+│   │   ├── main.rs      # Application entry point
+│   │   ├── app.rs       # libcosmic Application impl
+│   │   ├── message.rs   # UI message types
+│   │   ├── config.rs    # Config helpers
+│   │   ├── pages/       # UI pages
+│   │   └── widgets/     # Custom widgets
+│   └── i18n/            # Translations
+├── data/
+│   ├── com.system76.CosmicBackground.desktop
+│   ├── com.system76.CosmicBgSettings.desktop
+│   └── icons/
 └── Cargo.toml
 ```
 
 ### Data Flow
 
 ```
-cosmic-config ──> Config Watcher ──> apply_backgrounds()
-                                            │
-                                            ▼
-                        ┌─────────────────────────────────────┐
-                        │           Wallpaper                  │
-                        │  ┌─────────────────────────────┐    │
-                        │  │      WallpaperSource        │    │
-                        │  │  ┌─────────────────────┐    │    │
-                        │  │  │ Static │ Animated │ │    │    │
-                        │  │  │ Video  │ Shader   │ │    │    │
-                        │  │  └─────────────────────┘    │    │
-                        │  └─────────────────────────────┘    │
-                        │               │                      │
-                        │               ▼                      │
-                        │        ImageCache                    │
-                        │               │                      │
-                        │               ▼                      │
-                        │     FrameScheduler                   │
-                        └───────────────│─────────────────────┘
-                                        │
-                                        ▼
-                              wl_shm Buffer ──> Layer Surface
+┌─────────────────┐     ┌──────────────────┐
+│ cosmic-bg-ctl   │     │ cosmic-bg-settings│
+│     (CLI)       │     │      (GUI)        │
+└────────┬────────┘     └────────┬─────────┘
+         │                       │
+         └───────────┬───────────┘
+                     ▼
+              cosmic-config ──> Config Watcher ──> apply_backgrounds()
+                                                          │
+                                                          ▼
+                              ┌─────────────────────────────────────┐
+                              │           Wallpaper                  │
+                              │  ┌─────────────────────────────┐    │
+                              │  │      WallpaperSource        │    │
+                              │  │  ┌─────────────────────┐    │    │
+                              │  │  │ Static │ Animated │ │    │    │
+                              │  │  │ Video  │ Shader   │ │    │    │
+                              │  │  └─────────────────────┘    │    │
+                              │  └─────────────────────────────┘    │
+                              │               │                      │
+                              │               ▼                      │
+                              │        ImageCache                    │
+                              │               │                      │
+                              │               ▼                      │
+                              │     FrameScheduler                   │
+                              └───────────────│─────────────────────┘
+                                              │
+                                              ▼
+                                    wl_shm Buffer ──> Layer Surface
 ```
 
 ## Debugging
@@ -266,18 +427,18 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
 
 ## Integration Status
 
-| Feature | Implementation | Config Integration |
-|---------|---------------|-------------------|
-| Static Images | Complete | Complete |
-| Colors/Gradients | Complete | Complete |
-| GPU Shaders | Complete | Complete |
-| Animated Images | Complete | Pending |
-| Video Wallpapers | Complete | Pending |
-| Image Cache | Complete | Auto-enabled |
-| Async Loader | Complete | Pending |
-| Frame Scheduler | Complete | Pending |
-
-*"Pending" means the core implementation exists but config-level `Source::Animation` and `Source::Video` variants are not yet added to cosmic-bg-config.*
+| Feature | Implementation | Config Integration | CLI | GUI |
+|---------|---------------|-------------------|-----|-----|
+| Static Images | Complete | Complete | ✓ | ✓ |
+| Colors/Gradients | Complete | Complete | ✓ | ✓ |
+| GPU Shaders | Complete | Complete | ✓ | ✓ |
+| Animated Images | Complete | Complete | ✓ | ✓ |
+| Video Wallpapers | Complete | Complete | ✓ | ✓ |
+| Image Cache | Complete | Auto-enabled | - | - |
+| Async Loader | Complete | Auto-enabled | - | - |
+| Frame Scheduler | Complete | Auto-enabled | - | - |
+| Shell Completions | Complete | - | ✓ | - |
+| XDG File Picker | Complete | - | - | ✓ |
 
 ## License
 

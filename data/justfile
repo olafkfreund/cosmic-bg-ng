@@ -4,6 +4,9 @@ install-dir := env_var('INSTALL_DIR')
 desktop-src := appid + '.desktop'
 desktop-dst := install-dir / 'applications' / desktop-src
 
+settings-desktop-src := 'com.system76.CosmicBgSettings.desktop'
+settings-desktop-dst := install-dir / 'applications' / settings-desktop-src
+
 metainfo-src := appid + '.metainfo.xml'
 metainfo-dst := install-dir / 'metainfo' / metainfo-src
 
@@ -13,5 +16,12 @@ install:
     install -Dm0644 {{desktop-src}} {{desktop-dst}}
     install -Dm0644 {{metainfo-src}} {{metainfo-dst}}
     find v1 -type f -exec install -Dm0644 {} {{default-schema-target}}/{} \;
+
+install-settings:
+    install -Dm0644 {{settings-desktop-src}} {{settings-desktop-dst}}
+
 uninstall:
     rm {{desktop-dst}} {{metainfo-dst}}
+
+uninstall-settings:
+    rm {{settings-desktop-dst}}

@@ -22,67 +22,99 @@
         # Use latest Rust toolchain for 2024 edition support
         craneLib = (crane.mkLib pkgs).overrideToolchain fenix.packages.${system}.latest.toolchain;
 
+        # Common source filter
+        src = nix-filter.lib.filter {
+          root = ./.;
+          exclude = [
+            ./.gitignore
+            ./flake.nix
+            ./flake.lock
+            ./LICENSE.md
+            ./debian
+            ./nix
+            ./docs
+          ];
+        };
+
+        # Common build inputs
+        commonBuildInputs = with pkgs; [
+          wayland
+          libxkbcommon
+          desktop-file-utils
+          stdenv.cc.cc.lib
+          # GStreamer for video wallpaper support
+          gst_all_1.gstreamer
+          gst_all_1.gst-plugins-base
+          gst_all_1.gst-plugins-good
+          gst_all_1.gst-plugins-bad
+          gst_all_1.gst-plugins-ugly
+          gst_all_1.gst-libav
+          # Hardware acceleration support
+          libva
+          # wgpu/vulkan for shader support
+          vulkan-loader
+          vulkan-headers
+        ];
+
+        # Additional inputs for GUI application
+        guiBuildInputs = with pkgs; [
+          expat
+          fontconfig
+          freetype
+          libGL
+        ];
+
+        commonRuntimeDeps = with pkgs; [
+          wayland
+          vulkan-loader
+          gst_all_1.gstreamer
+          gst_all_1.gst-plugins-base
+          gst_all_1.gst-plugins-good
+        ];
+
+        guiRuntimeDeps = with pkgs; [
+          libGL
+          fontconfig
+        ];
+
+        commonNativeBuildInputs = with pkgs; [
+          just
+          pkg-config
+          autoPatchelfHook
+        ];
+
+        # Main cosmic-bg package definition
         pkgDef = {
           pname = "cosmic-bg-ng";
           version = "1.1.0";
-
-          src = nix-filter.lib.filter {
-            root = ./.;
-            exclude = [
-              ./.gitignore
-              ./flake.nix
-              ./flake.lock
-              ./LICENSE.md
-              ./debian
-              ./nix
-              ./docs
-            ];
-          };
-
-          nativeBuildInputs = with pkgs; [
-            just
-            pkg-config
-            autoPatchelfHook
-          ];
-
-          buildInputs = with pkgs; [
-            wayland
-            libxkbcommon
-            desktop-file-utils
-            stdenv.cc.cc.lib
-            # GStreamer for video wallpaper support
-            gst_all_1.gstreamer
-            gst_all_1.gst-plugins-base
-            gst_all_1.gst-plugins-good
-            gst_all_1.gst-plugins-bad
-            gst_all_1.gst-plugins-ugly
-            gst_all_1.gst-libav
-            # Hardware acceleration support
-            libva
-            # wgpu/vulkan for shader support
-            vulkan-loader
-            vulkan-headers
-          ];
-
-          runtimeDependencies = with pkgs; [
-            wayland
-            vulkan-loader
-            gst_all_1.gstreamer
-            gst_all_1.gst-plugins-base
-            gst_all_1.gst-plugins-good
-          ];
+          inherit src;
+          nativeBuildInputs = commonNativeBuildInputs;
+          buildInputs = commonBuildInputs;
+          runtimeDependencies = commonRuntimeDeps;
         };
 
         cargoArtifacts = craneLib.buildDepsOnly pkgDef;
 
+        # Build cosmic-bg (service) and cosmic-bg-ctl (CLI)
         cosmic-bg-ng = craneLib.buildPackage (pkgDef // {
           inherit cargoArtifacts;
           # Skip tests in sandbox - GStreamer/Wayland not available
           doCheck = false;
         });
+
+        # Build cosmic-bg-settings (GUI)
+        cosmic-bg-settings = craneLib.buildPackage (pkgDef // {
+          pname = "cosmic-bg-settings";
+          cargoExtraArgs = "-p cosmic-bg-settings";
+          inherit cargoArtifacts;
+          buildInputs = commonBuildInputs ++ guiBuildInputs;
+          runtimeDependencies = commonRuntimeDeps ++ guiRuntimeDeps;
+          doCheck = false;
+        });
+
       in {
         checks = {
-          inherit cosmic-bg-ng;
+          inherit cosmic-bg-ng cosmic-bg-settings;
         };
 
         packages = {
@@ -95,10 +127,38 @@
             '';
           });
           cosmic-bg-ng = self.packages.${system}.default;
+
+          # CLI tool package
+          cosmic-bg-ctl = craneLib.buildPackage (pkgDef // {
+            pname = "cosmic-bg-ctl";
+            cargoExtraArgs = "--bin cosmic-bg-ctl";
+            inherit cargoArtifacts;
+            doCheck = false;
+            installPhase = ''
+              mkdir -p $out/bin
+              cp target/release/cosmic-bg-ctl $out/bin/
+            '';
+          });
+
+          # GUI settings application
+          cosmic-bg-settings = cosmic-bg-settings.overrideAttrs (oldAttrs: {
+            installPhase = ''
+              mkdir -p $out/bin
+              cp target/release/cosmic-bg-settings $out/bin/
+            '';
+          });
         };
 
-        apps.default = flake-utils.lib.mkApp {
-          drv = self.packages.${system}.default;
+        apps = {
+          default = flake-utils.lib.mkApp {
+            drv = self.packages.${system}.default;
+          };
+          cosmic-bg-ctl = flake-utils.lib.mkApp {
+            drv = self.packages.${system}.cosmic-bg-ctl;
+          };
+          cosmic-bg-settings = flake-utils.lib.mkApp {
+            drv = self.packages.${system}.cosmic-bg-settings;
+          };
         };
 
         devShells.default = pkgs.mkShell rec {
@@ -118,6 +178,8 @@
               wayland
               vulkan-loader
               gst_all_1.gstreamer
+              libGL
+              fontconfig
             ])
           );
 
@@ -143,6 +205,8 @@
         default = final: prev: {
           cosmic-bg = self.packages.${prev.system}.default;
           cosmic-bg-ng = self.packages.${prev.system}.default;
+          cosmic-bg-ctl = self.packages.${prev.system}.cosmic-bg-ctl;
+          cosmic-bg-settings = self.packages.${prev.system}.cosmic-bg-settings;
         };
       };
     };

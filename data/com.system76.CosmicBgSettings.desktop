@@ -1,0 +1,30 @@
+[Desktop Entry]
+Name=Background Settings
+Name[zh_CN]=背景设置
+Name[ar]=إعدادات الخلفية
+Name[cs]=Nastavení pozadí
+Name[pl]=Ustawienia tapety
+Name[ru]=Настройки фона
+Name[sv]=Bakgrundsinställningar
+Comment=Configure desktop wallpapers and backgrounds
+Comment[zh_CN]=配置桌面壁纸和背景
+Comment[ar]=ضبط خلفيات وخلفيّات سطح المكتب
+Comment[cs]=Konfigurovat pozadí a tapety plochy
+Comment[pl]=Konfiguruj tapety i tła pulpitu
+Comment[ru]=Настройка обоев и фонов рабочего стола
+Comment[sv]=Konfigurera skrivbordsbakgrunder
+Type=Application
+Exec=cosmic-bg-settings
+Terminal=false
+Categories=Settings;DesktopSettings;COSMIC;
+# Translators: Search terms to find this application. Do NOT translate or localize the semicolons! The list MUST also end with a semicolon!
+Keywords=wallpaper;background;desktop;settings;theme;
+Keywords[zh_CN]=壁纸;背景;桌面;设置;主题;
+Keywords[ar]=خلفية;سطح المكتب;إعدادات;سمة;
+Keywords[cs]=pozadí;tapeta;plocha;nastavení;motiv;
+Keywords[pl]=tapeta;tło;pulpit;ustawienia;motyw;
+Keywords[ru]=обои;фон;рабочий стол;настройки;тема;
+Keywords[sv]=bakgrund;tapet;skrivbord;inställningar;tema;
+# Translators: Do NOT translate or transliterate this text (this is an icon file name)!
+Icon=com.system76.CosmicBackground
+StartupNotify=true
