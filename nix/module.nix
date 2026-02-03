@@ -116,12 +116,11 @@ in
     };
 
     # Add hardware acceleration packages for video decoding
-    hardware.opengl = mkIf cfg.settings.enableVideoWallpapers {
+    hardware.graphics = mkIf cfg.settings.enableVideoWallpapers {
       enable = mkDefault true;
       extraPackages = with pkgs; [
         libva
-        vaapiVdpau
-        libvdpau-va-gl
+        libva-vdpau-driver
       ];
     };
 
