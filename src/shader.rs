@@ -5,11 +5,12 @@
 //! This module provides real-time GPU-rendered animated backgrounds
 //! using WGSL shaders. Includes built-in presets and custom shader support.
 
-use crate::source::{Frame, SourceError, WallpaperSource};
+use crate::source::{Frame, FramePayload, SourceError, WallpaperSource};
 use cosmic_ext_bg_config::{ShaderConfig, ShaderPreset};
 use image::{DynamicImage, ImageBuffer, Rgba};
 use std::{
     path::Path,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -423,7 +424,7 @@ impl WallpaperSource for ShaderSource {
         let image = self.render_frame()?;
 
         Ok(Frame {
-            image,
+            payload: FramePayload::Image(Arc::new(image)),
             timestamp: Instant::now(),
         })
     }

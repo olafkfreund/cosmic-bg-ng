@@ -3,13 +3,14 @@
 use crate::{CosmicBg, CosmicBgLayer};
 use crate::animated::AnimatedSource;
 use crate::shader::ShaderSource;
-use crate::source::WallpaperSource;
+use crate::source::{FramePayload, WallpaperSource};
 use crate::video::VideoSource;
 
 use std::{
     collections::VecDeque,
     fs::{self, File},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -26,8 +27,9 @@ use sctk::{
             self, RegistrationToken,
             timer::{TimeoutAction, Timer},
         },
-        client::QueueHandle,
+        client::{QueueHandle, protocol::wl_surface},
     },
+    shell::WaylandSurface,
     shm::slot::CreateBufferError,
 };
 use thiserror::Error;
@@ -197,7 +199,7 @@ impl Wallpaper {
 
     pub fn draw(&mut self) {
         let start = Instant::now();
-        let mut cur_resized_img: Option<DynamicImage> = None;
+        let mut cur_resized_img: Option<Arc<DynamicImage>> = None;
 
         // Use indices to avoid borrow conflicts with self
         let layer_indices: Vec<usize> = self.layers
@@ -220,10 +222,28 @@ impl Wallpaper {
         }
     }
 
+    pub fn draw_video_frame_for_surface(&mut self, surface: &wl_surface::WlSurface) -> bool {
+        if !matches!(self.entry.source, Source::Video(_)) {
+            return false;
+        }
+
+        let Some(layer) = self
+            .layers
+            .iter_mut()
+            .find(|layer| layer.layer.wl_surface() == surface)
+        else {
+            return false;
+        };
+
+        layer.needs_redraw = true;
+        self.draw();
+        true
+    }
+
     fn draw_layer_by_index(
         &mut self,
         layer_idx: usize,
-        cur_resized_img: &mut Option<DynamicImage>,
+        cur_resized_img: &mut Option<Arc<DynamicImage>>,
         start: Instant,
     ) -> Result<(), DrawError> {
         // Calculate dimensions first (immutable borrow)
@@ -232,21 +252,55 @@ impl Wallpaper {
             self.calculate_layer_dimensions(layer)?
         };
 
-        let needs_new_image = cur_resized_img
-            .as_ref()
-            .map_or(true, |img| img.width() != width || img.height() != height);
+        if !matches!(self.entry.source, Source::Video(_)) {
+            let needs_new_image = cur_resized_img
+                .as_ref()
+                .map_or(true, |img| img.width() != width || img.height() != height);
 
-        if needs_new_image {
-            *cur_resized_img = Some(self.prepare_scaled_image(width, height)?);
+            if needs_new_image {
+                *cur_resized_img = Some(self.prepare_scaled_image(width, height)?);
+            }
+        }
+
+        let mut video_payload = None;
+        if matches!(self.entry.source, Source::Video(_)) {
+            if let Some(animated_source) = self.animated_source.as_mut() {
+                animated_source.prepare(width, height)
+                    .map_err(|e| DrawError::ImageDecode {
+                        path: PathBuf::from("animated"),
+                        reason: format!("Failed to prepare animated source: {}", e),
+                    })?;
+
+                let frame = animated_source.next_frame()
+                    .map_err(|e| DrawError::ImageDecode {
+                        path: PathBuf::from("animated"),
+                        reason: format!("Failed to get next frame: {}", e),
+                    })?;
+                video_payload = Some(frame.payload);
+            }
         }
 
         // Now we can get mutable access to the layer
         let layer = self.layers.get_mut(layer_idx).ok_or(DrawError::NoSource)?;
         let pool = layer.pool.as_mut().ok_or(DrawError::NoSource)?;
 
-        let image = cur_resized_img.as_ref().expect("cur_resized_img was just set");
-
-        let buffer = crate::draw::canvas(pool, image, width as i32, height as i32, width as i32 * 4)?;
+        let buffer = if let Some(payload) = video_payload {
+            match payload {
+                FramePayload::Bgrx { data, width: frame_width, height: frame_height, stride } if frame_width == width && frame_height == height && stride >= width as usize * 4 => {
+                        crate::draw::canvas_from_bgrx(pool, &data, frame_width, frame_height, stride)?
+                    }
+                FramePayload::Image(image) => {
+                    crate::draw::canvas(pool, &image, width as i32, height as i32, width as i32 * 4)?
+                }
+                FramePayload::Bgrx { .. } => {
+                    let black = DynamicImage::new_rgba8(width, height);
+                    crate::draw::canvas(pool, &black, width as i32, height as i32, width as i32 * 4)?
+                }
+            }
+        } else {
+            let image = cur_resized_img.as_ref().expect("cur_resized_img was just set");
+            crate::draw::canvas(pool, image, width as i32, height as i32, width as i32 * 4)?
+        };
 
         crate::draw::layer_surface(
             layer,
@@ -276,17 +330,19 @@ impl Wallpaper {
         Ok((width, height))
     }
 
-    fn prepare_scaled_image(&mut self, width: u32, height: u32) -> Result<DynamicImage, DrawError> {
+    fn prepare_scaled_image(&mut self, width: u32, height: u32) -> Result<Arc<DynamicImage>, DrawError> {
         // Clone to avoid borrow conflicts when calling methods that mutate self
         let source = self.current_source.clone().ok_or(DrawError::NoSource)?;
 
         match source {
-            Source::Path(ref path) => self.scale_image_from_path(path, width, height),
+            Source::Path(ref path) => self
+                .scale_image_from_path(path, width, height)
+                .map(Arc::new),
             Source::Color(Color::Single([r, g, b])) => {
-                Ok(self.generate_solid_color([r, g, b], width, height))
+                Ok(Arc::new(self.generate_solid_color([r, g, b], width, height)))
             }
             Source::Color(Color::Gradient(ref gradient)) => {
-                self.generate_gradient(gradient, width, height)
+                self.generate_gradient(gradient, width, height).map(Arc::new)
             }
             Source::Shader(_) | Source::Video(_) | Source::Animated(_) => {
                 // Use persistent animated source
@@ -312,7 +368,13 @@ impl Wallpaper {
                         reason: format!("Failed to get next frame: {}", e),
                     })?;
 
-                Ok(frame.image)
+                match frame.payload {
+                    FramePayload::Image(image) => Ok(image),
+                    FramePayload::Bgrx { .. } => Err(DrawError::ImageDecode {
+                        path: PathBuf::from("animated"),
+                        reason: "Unexpected raw frame payload for image path".to_string(),
+                    }),
+                }
             }
         }
     }
@@ -538,6 +600,12 @@ impl Wallpaper {
         // Remove existing animation timer if present
         if let Some(token) = self.animation_timer_token.take() {
             self.loop_handle.remove(token);
+        }
+
+        // Video playback is paced by Wayland frame callbacks. Timer-driven
+        // redraws can race the compositor cadence and cause visible jitter.
+        if matches!(self.entry.source, Source::Video(_)) {
+            return;
         }
 
         // Get frame duration from the animated source

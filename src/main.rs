@@ -434,9 +434,14 @@ impl CompositorHandler for CosmicBg {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        for wallpaper in &mut self.wallpapers {
+            if wallpaper.draw_video_frame_for_surface(surface) {
+                break;
+            }
+        }
     }
 
     fn transform_changed(

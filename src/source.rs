@@ -13,6 +13,7 @@ use image::DynamicImage;
 use std::{
     fs::File,
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use thiserror::Error;
@@ -26,8 +27,28 @@ pub const FALLBACK_RESOLUTION: (u32, u32) = (1920, 1080);
 /// A single frame to be rendered
 #[derive(Debug)]
 pub struct Frame {
-    pub image: DynamicImage,
+    pub payload: FramePayload,
     pub timestamp: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub enum FramePayload {
+    Image(Arc<DynamicImage>),
+    Bgrx {
+        data: Arc<[u8]>,
+        width: u32,
+        height: u32,
+        stride: usize,
+    },
+}
+
+impl Frame {
+    pub fn from_image(image: Arc<DynamicImage>) -> Self {
+        Self {
+            payload: FramePayload::Image(image),
+            timestamp: Instant::now(),
+        }
+    }
 }
 
 /// Errors that can occur when working with wallpaper sources
@@ -114,7 +135,7 @@ impl WallpaperSource for StaticSource {
         }
 
         Ok(Frame {
-            image: self.cached_image.as_ref().unwrap().clone(),
+            payload: FramePayload::Image(Arc::new(self.cached_image.as_ref().unwrap().clone())),
             timestamp: Instant::now(),
         })
     }
@@ -189,7 +210,7 @@ impl WallpaperSource for ColorSource {
         }
 
         Ok(Frame {
-            image: self.generated.as_ref().unwrap().clone(),
+            payload: FramePayload::Image(Arc::new(self.generated.as_ref().unwrap().clone())),
             timestamp: Instant::now(),
         })
     }
@@ -249,8 +270,11 @@ mod tests {
         let mut source = ColorSource::new(Color::Single([1.0, 0.0, 0.0]));
         source.prepare(100, 100).unwrap();
         let frame = source.next_frame().unwrap();
-        assert_eq!(frame.image.width(), 100);
-        assert_eq!(frame.image.height(), 100);
+        let FramePayload::Image(image) = frame.payload else {
+            panic!("expected image payload");
+        };
+        assert_eq!(image.width(), 100);
+        assert_eq!(image.height(), 100);
         assert!(!source.is_animated());
     }
 

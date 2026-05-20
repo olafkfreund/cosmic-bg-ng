@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: MPL-2.0
 
-use crate::source::{Frame, SourceError, WallpaperSource};
+use crate::source::{Frame, FramePayload, SourceError, WallpaperSource};
 use cosmic_ext_bg_config::VideoConfig;
 use gstreamer as gst;
 use gstreamer::prelude::*;
 use gstreamer_app as gst_app;
 use image::{DynamicImage, ImageBuffer, Rgba};
 use std::{
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
+
+const VIDEO_TARGET_FPS: u32 = 60;
+const VIDEO_FRAME_DURATION: Duration = Duration::from_micros(1_000_000 / VIDEO_TARGET_FPS as u64);
 
 /// Helper to convert GStreamer errors to SourceError
 fn gst_error(message: impl Into<String>) -> SourceError {
@@ -35,7 +38,7 @@ pub struct VideoSource {
     config: VideoConfig,
     pipeline: Option<gst::Pipeline>,
     appsink: Option<gst_app::AppSink>,
-    current_frame: Arc<Mutex<Option<DynamicImage>>>,
+    last_frame: Option<FramePayload>,
     target_size: Option<(u32, u32)>,
     frame_duration: Duration,
     is_playing: bool,
@@ -52,9 +55,9 @@ impl VideoSource {
             config,
             pipeline: None,
             appsink: None,
-            current_frame: Arc::new(Mutex::new(None)),
+            last_frame: None,
             target_size: None,
-            frame_duration: crate::source::DEFAULT_FRAME_DURATION,
+            frame_duration: VIDEO_FRAME_DURATION,
             is_playing: false,
             is_prepared: false,
         })
@@ -64,19 +67,15 @@ impl VideoSource {
     fn build_pipeline(&mut self, width: u32, height: u32) -> Result<(), SourceError> {
         let path = self.config.path.to_str().ok_or_else(|| gst_error("Invalid video path"))?;
 
-        // Detect hardware acceleration capabilities
-        let hw_decode = if self.config.hw_accel {
-            Self::detect_hw_decoder()
-        } else {
-            None
-        };
-
-        // Build pipeline string with hardware acceleration if available
-        let decode_element = match hw_decode {
-            Some(HwDecoder::VaApi) => "vaapidecodebin",
-            Some(HwDecoder::Nvdec) => "nvdec",
-            None => "decodebin",
-        };
+        // Detect hardware acceleration capabilities for diagnostics only.
+        //
+        // Modern GStreamer exposes VA-API decoders as codec-specific elements
+        // such as `vah264dec`/`vah265dec` instead of the older
+        // `vaapidecodebin`. Plain `decodebin` can autoplug those hardware
+        // decoders based on rank, so forcing a specific decoder bin here is
+        // less portable across distributions.
+        let hw_decode = self.config.hw_accel.then(Self::detect_hw_decoder).flatten();
+        let decode_element = "decodebin";
 
         tracing::info!(
             hw_accel = ?hw_decode,
@@ -93,6 +92,7 @@ impl VideoSource {
             .map_err(|e| gst_error(format!("Failed to create filesrc: {}", e)))?;
 
         let decodebin = create_element(decode_element)?;
+        let videorate = create_element("videorate")?;
         let videoconvert = create_element("videoconvert")?;
         let videoscale = create_element("videoscale")?;
 
@@ -100,36 +100,50 @@ impl VideoSource {
             .name("sink")
             .build();
 
-        // Configure appsink caps for RGBA format
+        // Configure appsink caps for BGRx format.
         let caps = gst::Caps::builder("video/x-raw")
-            .field("format", "RGBA")
+            .field("format", "BGRx")
             .field("width", width as i32)
             .field("height", height as i32)
+            .field("framerate", gst::Fraction::new(VIDEO_TARGET_FPS as i32, 1))
             .build();
 
         appsink.set_caps(Some(&caps));
-        appsink.set_property("emit-signals", true);
-        appsink.set_property("sync", false); // Don't sync to clock for wallpapers
+        // Keep only the latest frame. Video wallpapers redraw from the most
+        // recent frame, so queueing old frames just adds latency and memory
+        // pressure when the compositor cannot consume at the source framerate.
+        appsink.set_property("max-buffers", 1u32);
+        appsink.set_property("drop", true);
+        // We pull frames on demand from next_frame(), so keep appsink unsynced
+        // to avoid introducing a second pacing clock besides compositor frames.
+        appsink.set_property("sync", false);
 
         // Add elements to pipeline
         pipeline
-            .add_many([&filesrc, &decodebin, &videoconvert, &videoscale, appsink.upcast_ref()])
+            .add_many([
+                &filesrc,
+                &decodebin,
+                &videorate,
+                &videoconvert,
+                &videoscale,
+                appsink.upcast_ref(),
+            ])
             .map_err(|e| gst_error(format!("Failed to add elements to pipeline: {}", e)))?;
 
         // Link static elements
         link_elements(&[&filesrc, &decodebin])?;
-        link_elements(&[&videoconvert, &videoscale, appsink.upcast_ref()])?;
+        link_elements(&[&videorate, &videoconvert, &videoscale, appsink.upcast_ref()])?;
 
         // Handle dynamic pad linking from decodebin
-        let videoconvert_weak = videoconvert.downgrade();
+        let videorate_weak = videorate.downgrade();
         decodebin.connect_pad_added(move |_src, src_pad| {
-            let Some(videoconvert) = videoconvert_weak.upgrade() else {
+            let Some(videorate) = videorate_weak.upgrade() else {
                 return;
             };
 
-            let sink_pad = videoconvert
+            let sink_pad = videorate
                 .static_pad("sink")
-                .expect("videoconvert has no sink pad");
+                .expect("videorate has no sink pad");
 
             if sink_pad.is_linked() {
                 return;
@@ -149,42 +163,6 @@ impl VideoSource {
                 }
             }
         });
-
-        // Setup appsink callbacks
-        let current_frame = Arc::clone(&self.current_frame);
-        appsink.set_callbacks(
-            gst_app::AppSinkCallbacks::builder()
-                .new_sample(move |appsink| {
-                    let sample = appsink.pull_sample().map_err(|_| gst::FlowError::Error)?;
-
-                    if let Some(buffer) = sample.buffer() {
-                        let map = buffer.map_readable().map_err(|_| gst::FlowError::Error)?;
-                        let caps = sample.caps().ok_or(gst::FlowError::Error)?;
-                        let structure = caps.structure(0).ok_or(gst::FlowError::Error)?;
-
-                        let width = structure
-                            .get::<i32>("width")
-                            .map_err(|_| gst::FlowError::Error)? as u32;
-                        let height = structure
-                            .get::<i32>("height")
-                            .map_err(|_| gst::FlowError::Error)? as u32;
-
-                        if let Some(img_buffer) = ImageBuffer::<Rgba<u8>, _>::from_raw(
-                            width,
-                            height,
-                            map.as_slice().to_vec(),
-                        ) {
-                            let image = DynamicImage::ImageRgba8(img_buffer);
-                            if let Ok(mut frame) = current_frame.lock() {
-                                *frame = Some(image);
-                            }
-                        }
-                    }
-
-                    Ok(gst::FlowSuccess::Ok)
-                })
-                .build(),
-        );
 
         // Store pipeline and appsink
         self.pipeline = Some(pipeline.clone());
@@ -208,21 +186,31 @@ impl VideoSource {
         Ok(())
     }
 
-    /// Detect available hardware decoder
+    /// Detect available hardware decoder families.
     fn detect_hw_decoder() -> Option<HwDecoder> {
-        // Check for VA-API support (Intel, AMD)
-        if gst::ElementFactory::find("vaapidecodebin").is_some() {
-            tracing::info!("VA-API hardware acceleration available");
+        // Check modern VA-API support (Intel, AMD). Fedora and other current
+        // distributions expose hardware decoders through the `va` plugin as
+        // codec-specific elements instead of the legacy `vaapi` plugin.
+        if ["vah264dec", "vah265dec", "vaav1dec", "vavp8dec", "vavp9dec"]
+            .into_iter()
+            .any(|element| gst::ElementFactory::find(element).is_some())
+            || gst::ElementFactory::find("vaapidecodebin").is_some()
+        {
+            tracing::info!("VA-API hardware decoders available through GStreamer");
             return Some(HwDecoder::VaApi);
         }
 
         // Check for NVDEC support (NVIDIA)
-        if gst::ElementFactory::find("nvdec").is_some() {
-            tracing::info!("NVDEC hardware acceleration available");
+        if ["nvh264dec", "nvh265dec", "nvav1dec", "nvvp8dec", "nvvp9dec"]
+            .into_iter()
+            .any(|element| gst::ElementFactory::find(element).is_some())
+            || gst::ElementFactory::find("nvdec").is_some()
+        {
+            tracing::info!("NVDEC hardware decoders available through GStreamer");
             return Some(HwDecoder::Nvdec);
         }
 
-        tracing::info!("No hardware acceleration available, using software decode");
+        tracing::info!("No known hardware decoder factories found; decodebin may use software decode");
         None
     }
 
@@ -301,16 +289,20 @@ impl WallpaperSource for VideoSource {
         // Check for end-of-stream and loop if needed
         self.check_eos()?;
 
-        // Get current frame from buffer
-        let frame_opt = self
-            .current_frame
-            .lock()
-            .ok()
-            .and_then(|guard| guard.clone());
+        if let Some(appsink) = self.appsink.as_ref() {
+            if let Some(sample) = appsink.try_pull_sample(gst::ClockTime::ZERO) {
+                if let Some(frame) = sample_to_frame(&sample) {
+                    self.last_frame = Some(frame);
+                }
+            }
+        }
 
-        if let Some(image) = frame_opt {
+        // Clone only the Arc, not the full image. At ultrawide resolutions a
+        // single full-frame clone costs tens of megabytes, so shared ownership
+        // matters for 60 FPS video.
+        if let Some(payload) = self.last_frame.as_ref() {
             Ok(Frame {
-                image,
+                payload: payload.clone(),
                 timestamp: Instant::now(),
             })
         } else {
@@ -318,7 +310,7 @@ impl WallpaperSource for VideoSource {
             let (width, height) = self.target_size.unwrap_or(crate::source::FALLBACK_RESOLUTION);
             let black = ImageBuffer::from_pixel(width, height, Rgba([0, 0, 0, 255]));
             Ok(Frame {
-                image: DynamicImage::ImageRgba8(black),
+                payload: FramePayload::Image(Arc::new(DynamicImage::ImageRgba8(black))),
                 timestamp: Instant::now(),
             })
         }
@@ -352,7 +344,7 @@ impl WallpaperSource for VideoSource {
 
         self.pipeline = None;
         self.appsink = None;
-        self.current_frame = Arc::new(Mutex::new(None));
+        self.last_frame = None;
         self.is_playing = false;
         self.is_prepared = false;
 
@@ -367,6 +359,62 @@ impl WallpaperSource for VideoSource {
             self.config.hw_accel
         )
     }
+}
+
+fn sample_to_frame(sample: &gst::Sample) -> Option<FramePayload> {
+    let buffer = sample.buffer()?;
+    let map = buffer.map_readable().ok()?;
+    let caps = sample.caps()?;
+    let structure = caps.structure(0)?;
+
+    let width = structure.get::<i32>("width").ok()? as u32;
+    let height = structure.get::<i32>("height").ok()? as u32;
+    let stride = structure.get::<i32>("stride").ok().map(|s| s as usize).unwrap_or(width as usize * 4);
+    let frame_size = stride.checked_mul(height as usize)?;
+
+    if map.as_slice().len() < frame_size {
+        return None;
+    }
+
+    let raw = Arc::<[u8]>::from(map.as_slice()[..frame_size].to_vec());
+
+    Some(FramePayload::Bgrx {
+        data: raw,
+        width,
+        height,
+        stride,
+    })
+}
+
+#[allow(dead_code)]
+fn sample_to_image(sample: &gst::Sample) -> Option<Arc<DynamicImage>> {
+    let payload = sample_to_frame(sample)?;
+    let FramePayload::Bgrx {
+        data,
+        width,
+        height,
+        stride,
+    } = payload
+    else {
+        return None;
+    };
+
+    let mut rgba = vec![0u8; width as usize * height as usize * 4];
+    for row in 0..height as usize {
+        let src_start = row * stride;
+        let src_end = src_start + width as usize * 4;
+        let dst_start = row * width as usize * 4;
+        let src_row = &data[src_start..src_end];
+        let dst_row = &mut rgba[dst_start..dst_start + width as usize * 4];
+
+        for (src, dst) in src_row.chunks_exact(4).zip(dst_row.chunks_exact_mut(4)) {
+            let [b, g, r, _x] = src else { unreachable!() };
+            dst.copy_from_slice(&[*r, *g, *b, 255]);
+        }
+    }
+
+    let img_buffer = ImageBuffer::<Rgba<u8>, _>::from_raw(width, height, rgba)?;
+    Some(Arc::new(DynamicImage::ImageRgba8(img_buffer)))
 }
 
 /// Hardware decoder types
