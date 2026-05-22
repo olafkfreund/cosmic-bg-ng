@@ -291,7 +291,7 @@ impl WallpaperSource for VideoSource {
 
         if let Some(appsink) = self.appsink.as_ref() {
             if let Some(sample) = appsink.try_pull_sample(gst::ClockTime::ZERO) {
-                if let Some(frame) = sample_to_frame(&sample) {
+                if let Some(frame) = sample_to_frame(&sample, &mut self.last_frame) {
                     self.last_frame = Some(frame);
                 }
             }
@@ -361,7 +361,10 @@ impl WallpaperSource for VideoSource {
     }
 }
 
-fn sample_to_frame(sample: &gst::Sample) -> Option<FramePayload> {
+fn sample_to_frame(
+    sample: &gst::Sample,
+    reusable_frame: &mut Option<FramePayload>,
+) -> Option<FramePayload> {
     let buffer = sample.buffer()?;
     let map = buffer.map_readable().ok()?;
     let caps = sample.caps()?;
@@ -369,14 +372,33 @@ fn sample_to_frame(sample: &gst::Sample) -> Option<FramePayload> {
 
     let width = structure.get::<i32>("width").ok()? as u32;
     let height = structure.get::<i32>("height").ok()? as u32;
-    let stride = structure.get::<i32>("stride").ok().map(|s| s as usize).unwrap_or(width as usize * 4);
+    let stride = structure
+        .get::<i32>("stride")
+        .ok()
+        .map(|s| s as usize)
+        .unwrap_or(width as usize * 4);
     let frame_size = stride.checked_mul(height as usize)?;
 
     if map.as_slice().len() < frame_size {
         return None;
     }
 
-    let raw = Arc::<[u8]>::from(map.as_slice()[..frame_size].to_vec());
+    let source = &map.as_slice()[..frame_size];
+
+    let raw = match reusable_frame.take() {
+        Some(FramePayload::Bgrx { mut data, .. }) if data.len() == frame_size => {
+            if let Some(bytes) = Arc::get_mut(&mut data) {
+                bytes.copy_from_slice(source);
+                data
+            } else {
+                Arc::<[u8]>::from(source.to_vec())
+            }
+        }
+        frame => {
+            *reusable_frame = frame;
+            Arc::<[u8]>::from(source.to_vec())
+        }
+    };
 
     Some(FramePayload::Bgrx {
         data: raw,
@@ -388,7 +410,7 @@ fn sample_to_frame(sample: &gst::Sample) -> Option<FramePayload> {
 
 #[allow(dead_code)]
 fn sample_to_image(sample: &gst::Sample) -> Option<Arc<DynamicImage>> {
-    let payload = sample_to_frame(sample)?;
+    let payload = sample_to_frame(sample, &mut None)?;
     let FramePayload::Bgrx {
         data,
         width,
