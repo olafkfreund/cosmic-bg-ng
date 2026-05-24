@@ -57,6 +57,9 @@ enum Commands {
         /// Disable hardware acceleration
         #[arg(long)]
         no_hw_accel: bool,
+        /// Target FPS limit (default: 60)
+        #[arg(long)]
+        fps: Option<u32>,
     },
 
     /// Set an animated image wallpaper (GIF, WebP, APNG)
@@ -162,7 +165,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             r#loop,
             speed,
             no_hw_accel,
-        } => cmd_video(&context, path, output, r#loop, speed, no_hw_accel),
+            fps,
+        } => cmd_video(&context, path, output, r#loop, speed, no_hw_accel, fps),
         Commands::Animated {
             path,
             output,
@@ -246,6 +250,7 @@ fn cmd_video(
     loop_playback: bool,
     speed: Option<f64>,
     no_hw_accel: bool,
+    fps: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = path.canonicalize().map_err(|e| format!("Invalid path: {e}"))?;
 
@@ -254,12 +259,14 @@ fn cmd_video(
     }
 
     let output_name = output.unwrap_or_else(|| "all".to_string());
+    let fps = fps.map(|f| f.clamp(1, 240));
 
     let video_config = VideoConfig {
         path: path.clone(),
         loop_playback,
         playback_speed: speed.unwrap_or(1.0),
         hw_accel: !no_hw_accel,
+        fps_limit: fps,
     };
 
     let entry = Entry::new(output_name.clone(), Source::Video(video_config));
@@ -276,6 +283,9 @@ fn cmd_video(
     }
     if no_hw_accel {
         println!("  Hardware acceleration: disabled");
+    }
+    if let Some(f) = fps {
+        println!("  FPS limit: {f}");
     }
     Ok(())
 }
@@ -497,6 +507,7 @@ fn print_entry(entry: &Entry) {
             println!("  Loop: {}", v.loop_playback);
             println!("  Speed: {}x", v.playback_speed);
             println!("  HW Accel: {}", v.hw_accel);
+            println!("  FPS limit: {}", v.target_fps());
         }
         Source::Animated(a) => {
             println!("  Type: Animated image\n  Path: {}", a.path.display());

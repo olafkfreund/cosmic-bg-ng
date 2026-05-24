@@ -11,8 +11,9 @@ use std::{
     time::{Duration, Instant},
 };
 
-const VIDEO_TARGET_FPS: u32 = 60;
-const VIDEO_FRAME_DURATION: Duration = Duration::from_micros(1_000_000 / VIDEO_TARGET_FPS as u64);
+fn frame_duration_from_fps(fps: u32) -> Duration {
+    Duration::from_micros(1_000_000 / u64::from(fps))
+}
 
 /// Helper to convert GStreamer errors to SourceError
 fn gst_error(message: impl Into<String>) -> SourceError {
@@ -51,13 +52,15 @@ impl VideoSource {
         // Initialize GStreamer if not already initialized
         gst::init().map_err(|e| gst_error(format!("GStreamer initialization failed: {}", e)))?;
 
+        let frame_duration = frame_duration_from_fps(config.target_fps());
+
         Ok(Self {
             config,
             pipeline: None,
             appsink: None,
             last_frame: None,
             target_size: None,
-            frame_duration: VIDEO_FRAME_DURATION,
+            frame_duration,
             is_playing: false,
             is_prepared: false,
         })
@@ -100,12 +103,14 @@ impl VideoSource {
             .name("sink")
             .build();
 
+        let target_fps = self.config.target_fps();
+
         // Configure appsink caps for BGRx format.
         let caps = gst::Caps::builder("video/x-raw")
             .field("format", "BGRx")
             .field("width", width as i32)
             .field("height", height as i32)
-            .field("framerate", gst::Fraction::new(VIDEO_TARGET_FPS as i32, 1))
+            .field("framerate", gst::Fraction::new(target_fps as i32, 1))
             .build();
 
         appsink.set_caps(Some(&caps));
@@ -242,12 +247,8 @@ impl VideoSource {
         Ok(())
     }
 
-    /// Check if video has reached end and loop if configured
-    fn check_eos(&mut self) -> Result<(), SourceError> {
-        if !self.config.loop_playback {
-            return Ok(());
-        }
-
+    /// Check non-blocking GStreamer bus messages for diagnostics and EOS handling.
+    fn handle_bus_messages(&mut self) -> Result<(), SourceError> {
         let Some(ref pipeline) = self.pipeline else {
             return Ok(());
         };
@@ -256,20 +257,41 @@ impl VideoSource {
             return Err(gst_error("No bus available"));
         };
 
-        // Check for EOS message (non-blocking)
-        let Some(msg) = bus.pop_filtered(&[gst::MessageType::Eos]) else {
-            return Ok(());
-        };
-
-        if let gst::MessageView::Eos(_) = msg.view() {
-            tracing::debug!("Video reached end, looping");
-            // Seek back to start
-            pipeline
-                .seek_simple(
-                    gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
-                    gst::ClockTime::from_seconds(0),
-                )
-                .ok();
+        while let Some(msg) = bus.pop_filtered(&[
+            gst::MessageType::Error,
+            gst::MessageType::Warning,
+            gst::MessageType::Eos,
+        ]) {
+            match msg.view() {
+                gst::MessageView::Error(error) => {
+                    tracing::error!(
+                        error = %error.error(),
+                        debug = ?error.debug(),
+                        "GStreamer video pipeline error"
+                    );
+                }
+                gst::MessageView::Warning(warning) => {
+                    tracing::warn!(
+                        warning = %warning.error(),
+                        debug = ?warning.debug(),
+                        "GStreamer video pipeline warning"
+                    );
+                }
+                gst::MessageView::Eos(_) => {
+                    if self.config.loop_playback {
+                        tracing::debug!("Video reached end, looping");
+                        pipeline
+                            .seek_simple(
+                                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                                gst::ClockTime::from_seconds(0),
+                            )
+                            .ok();
+                    } else {
+                        tracing::debug!("Video reached end");
+                    }
+                }
+                _ => {}
+            }
         }
 
         Ok(())
@@ -286,11 +308,19 @@ impl WallpaperSource for VideoSource {
             self.play()?;
         }
 
-        // Check for end-of-stream and loop if needed
-        self.check_eos()?;
+        // Check for pipeline diagnostics and end-of-stream handling.
+        self.handle_bus_messages()?;
 
         if let Some(appsink) = self.appsink.as_ref() {
-            if let Some(sample) = appsink.try_pull_sample(gst::ClockTime::ZERO) {
+            let timeout = if self.last_frame.is_some() {
+                gst::ClockTime::ZERO
+            } else {
+                gst::ClockTime::from_mseconds(
+                    self.frame_duration.min(Duration::from_millis(50)).as_millis() as u64,
+                )
+            };
+
+            if let Some(sample) = appsink.try_pull_sample(timeout) {
                 if let Some(frame) = sample_to_frame(&sample, &mut self.last_frame) {
                     self.last_frame = Some(frame);
                 }
@@ -353,10 +383,11 @@ impl WallpaperSource for VideoSource {
 
     fn description(&self) -> String {
         format!(
-            "Video: {} (loop: {}, hw_accel: {})",
+            "Video: {} (loop: {}, hw_accel: {}, fps: {})",
             self.config.path.display(),
             self.config.loop_playback,
-            self.config.hw_accel
+            self.config.hw_accel,
+            self.config.target_fps()
         )
     }
 }
@@ -463,6 +494,33 @@ mod tests {
         assert!(config.loop_playback);
         assert_eq!(config.playback_speed, 1.0);
         assert!(config.hw_accel);
+        assert_eq!(config.fps_limit, None);
+        assert_eq!(config.target_fps(), 60);
+    }
+
+    #[test]
+    fn test_video_config_fps_limit() {
+        let config = VideoConfig {
+            fps_limit: Some(30),
+            ..Default::default()
+        };
+
+        assert_eq!(config.target_fps(), 30);
+    }
+
+    #[test]
+    fn test_video_config_fps_limit_clamps_to_safe_range() {
+        let too_low = VideoConfig {
+            fps_limit: Some(0),
+            ..Default::default()
+        };
+        let too_high = VideoConfig {
+            fps_limit: Some(999),
+            ..Default::default()
+        };
+
+        assert_eq!(too_low.target_fps(), 1);
+        assert_eq!(too_high.target_fps(), 240);
     }
 
     #[test]
@@ -496,5 +554,6 @@ mod tests {
         assert!(desc.contains("Video:"));
         assert!(desc.contains("/tmp/video.mp4"));
         assert!(desc.contains("loop: true"));
+        assert!(desc.contains("fps: 60"));
     }
 }

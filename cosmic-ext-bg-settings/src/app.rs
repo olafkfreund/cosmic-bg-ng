@@ -149,6 +149,9 @@ impl Application for App {
             Message::VideoHwAccelChanged(hw_accel) => {
                 self.wallpaper_page.video_hw_accel = hw_accel;
             }
+            Message::VideoFpsChanged(fps) => {
+                self.wallpaper_page.video_fps = fps;
+            }
             Message::AnimatedFpsChanged(fps) => {
                 self.wallpaper_page.animated_fps = fps;
             }

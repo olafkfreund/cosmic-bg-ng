@@ -174,6 +174,9 @@ pub struct VideoConfig {
     /// Enable hardware acceleration (default: true)
     #[serde(default = "default_hw_accel")]
     pub hw_accel: bool,
+    /// Optional target frames per second (default: 60)
+    #[serde(default)]
+    pub fps_limit: Option<u32>,
 }
 
 fn default_loop_playback() -> bool {
@@ -198,6 +201,12 @@ impl VideoConfig {
             1.0
         }
     }
+
+    /// Returns fps_limit clamped to a safe range (1..=240), defaulting to 60 FPS.
+    #[must_use]
+    pub fn target_fps(&self) -> u32 {
+        self.fps_limit.unwrap_or(60).clamp(1, 240)
+    }
 }
 
 impl Default for VideoConfig {
@@ -207,6 +216,7 @@ impl Default for VideoConfig {
             loop_playback: true,
             playback_speed: 1.0,
             hw_accel: true,
+            fps_limit: None,
         }
     }
 }
@@ -413,7 +423,8 @@ impl Config {
         context: &Context,
         entry: Entry,
     ) -> Result<(), cosmic_config::Error> {
-        let output_key = if entry.output == "all" {
+        let is_default_entry = entry.output == "all";
+        let output_key = if is_default_entry {
             entry.output.clone()
         } else {
             self.outputs.insert(entry.output.clone());
@@ -428,6 +439,10 @@ impl Config {
             *old = entry;
         } else if entry.output != "all" {
             self.backgrounds.push(entry);
+        }
+
+        if is_default_entry {
+            return Ok(());
         }
 
         let new_value = self.outputs.iter().cloned().collect::<Vec<_>>();

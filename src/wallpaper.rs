@@ -157,6 +157,9 @@ impl Wallpaper {
                 self.loop_handle.remove(token);
             }
             self.animated_source = None;
+            for layer in &mut self.layers {
+                layer.last_video_frame_draw = None;
+            }
             self.load_images();
         }
 
@@ -227,16 +230,51 @@ impl Wallpaper {
             return false;
         }
 
-        let Some(layer) = self
+        let frame_duration = self
+            .animated_source
+            .as_ref()
+            .map(|source| source.frame_duration())
+            .unwrap_or(crate::source::DEFAULT_FRAME_DURATION);
+
+        let Some(layer_idx) = self
             .layers
-            .iter_mut()
-            .find(|layer| layer.layer.wl_surface() == surface)
+            .iter()
+            .position(|layer| layer.layer.wl_surface() == surface)
         else {
             return false;
         };
 
-        layer.needs_redraw = true;
-        self.draw();
+        if self.layers[layer_idx]
+            .last_video_frame_draw
+            .is_some_and(|last_draw| last_draw.elapsed() < frame_duration)
+        {
+            self.layers[layer_idx]
+                .layer
+                .wl_surface()
+                .frame(&self.queue_handle, surface.clone());
+            surface.commit();
+            return true;
+        }
+
+        self.layers[layer_idx].needs_redraw = true;
+
+        match self.draw_layer_by_index(layer_idx, &mut None, Instant::now()) {
+            Ok(()) => {
+                self.layers[layer_idx].last_video_frame_draw = Some(Instant::now());
+            }
+            Err(DrawError::NoSource) => {
+                tracing::info!("No source for wallpaper");
+                self.layers[layer_idx]
+                    .layer
+                    .wl_surface()
+                    .frame(&self.queue_handle, surface.clone());
+                surface.commit();
+            }
+            Err(why) => {
+                tracing::error!(?why, "wallpaper could not be drawn");
+            }
+        }
+
         true
     }
 
