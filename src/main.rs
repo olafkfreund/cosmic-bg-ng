@@ -48,6 +48,7 @@ mod malloc {
 use cosmic_ext_bg_config::{Config, state::State};
 use cosmic_config::{CosmicConfigEntry, calloop::ConfigWatchSource};
 use eyre::Context;
+use std::time::Instant;
 use sctk::{
     compositor::{CompositorHandler, CompositorState},
     delegate_compositor, delegate_layer, delegate_output, delegate_registry, delegate_shm,
@@ -97,6 +98,7 @@ pub struct CosmicBgLayer {
     output_info: OutputInfo,
     pool: Option<SlotPool>,
     needs_redraw: bool,
+    last_video_frame_draw: Option<Instant>,
     size: Option<(u32, u32)>,
     fractional_scale: Option<u32>,
     transform: wl_output::Transform,
@@ -402,6 +404,7 @@ impl CosmicBg {
             size: None,
             fractional_scale,
             needs_redraw: false,
+            last_video_frame_draw: None,
             pool: None,
         }
     }
@@ -434,9 +437,14 @@ impl CompositorHandler for CosmicBg {
         &mut self,
         _conn: &Connection,
         _qh: &QueueHandle<Self>,
-        _surface: &wl_surface::WlSurface,
+        surface: &wl_surface::WlSurface,
         _time: u32,
     ) {
+        for wallpaper in &mut self.wallpapers {
+            if wallpaper.draw_video_frame_for_surface(surface) {
+                break;
+            }
+        }
     }
 
     fn transform_changed(

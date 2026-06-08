@@ -2,14 +2,16 @@
 
 use crate::{CosmicBg, CosmicBgLayer};
 use crate::animated::AnimatedSource;
+use crate::scaler::FitBlurBgrxWorkspace;
 use crate::shader::ShaderSource;
-use crate::source::WallpaperSource;
+use crate::source::{FramePayload, WallpaperSource};
 use crate::video::VideoSource;
 
 use std::{
     collections::VecDeque,
     fs::{self, File},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -26,13 +28,16 @@ use sctk::{
             self, RegistrationToken,
             timer::{TimeoutAction, Timer},
         },
-        client::QueueHandle,
+        client::{QueueHandle, protocol::wl_surface},
     },
+    shell::WaylandSurface,
     shm::slot::CreateBufferError,
 };
 use thiserror::Error;
 use tracing::error;
 use walkdir::WalkDir;
+
+const FIT_BLUR_BACKGROUND_REFRESH_FRAMES: u32 = 60;
 
 // TODO filter images by whether they seem to match dark / light mode
 // Alternatively only load from light / dark subdirectories given a directory source when this is active
@@ -68,6 +73,17 @@ pub struct Wallpaper {
     // Filesystem watcher for live wallpaper directory updates.
     // Must be stored here to keep the watcher alive for the lifetime of this wallpaper.
     _watcher: Option<RecommendedWatcher>,
+    fit_blur_background_cache: Vec<FitBlurBackgroundCache>,
+    fit_blur_bgrx_workspace: FitBlurBgrxWorkspace,
+}
+
+struct FitBlurBackgroundCache {
+    layer_width: u32,
+    layer_height: u32,
+    frame_width: u32,
+    frame_height: u32,
+    frames_since_refresh: u32,
+    background: Arc<[u8]>,
 }
 
 impl std::fmt::Debug for Wallpaper {
@@ -81,6 +97,7 @@ impl std::fmt::Debug for Wallpaper {
             .field("timer_token", &self.timer_token)
             .field("animated_source", &self.animated_source.as_ref().map(|s| s.description()))
             .field("animation_timer_token", &self.animation_timer_token)
+            .field("fit_blur_background_cache", &self.fit_blur_background_cache.len())
             .finish_non_exhaustive()
     }
 }
@@ -94,6 +111,25 @@ impl Drop for Wallpaper {
             self.loop_handle.remove(token);
         }
     }
+}
+
+enum PreparedVideoFrame {
+    Bgrx {
+        data: Arc<[u8]>,
+        width: u32,
+        height: u32,
+        stride: usize,
+    },
+    FitBlurBgrx {
+        background: Arc<[u8]>,
+        data: Arc<[u8]>,
+        frame_width: u32,
+        frame_height: u32,
+        frame_stride: usize,
+        layer_width: u32,
+        layer_height: u32,
+    },
+    Image(DynamicImage),
 }
 
 impl Wallpaper {
@@ -113,6 +149,8 @@ impl Wallpaper {
             animated_source: None,
             animation_timer_token: None,
             _watcher: None,
+            fit_blur_background_cache: Vec::new(),
+            fit_blur_bgrx_workspace: FitBlurBgrxWorkspace::default(),
             loop_handle,
             queue_handle,
         };
@@ -150,11 +188,15 @@ impl Wallpaper {
         // If source changed, reload images (this will be called from apply_backgrounds)
         if source_changed {
             self.current_image = None;
+            self.fit_blur_background_cache.clear();
             // Clear animated source and timer
             if let Some(token) = self.animation_timer_token.take() {
                 self.loop_handle.remove(token);
             }
             self.animated_source = None;
+            for layer in &mut self.layers {
+                layer.last_video_frame_draw = None;
+            }
             self.load_images();
         }
 
@@ -168,6 +210,7 @@ impl Wallpaper {
 
         // Trigger redraw if scaling mode changed
         if scaling_changed {
+            self.fit_blur_background_cache.clear();
             for layer in &mut self.layers {
                 layer.needs_redraw = true;
             }
@@ -197,7 +240,7 @@ impl Wallpaper {
 
     pub fn draw(&mut self) {
         let start = Instant::now();
-        let mut cur_resized_img: Option<DynamicImage> = None;
+        let mut cur_resized_img: Option<Arc<DynamicImage>> = None;
 
         // Use indices to avoid borrow conflicts with self
         let layer_indices: Vec<usize> = self.layers
@@ -220,10 +263,63 @@ impl Wallpaper {
         }
     }
 
+    pub fn draw_video_frame_for_surface(&mut self, surface: &wl_surface::WlSurface) -> bool {
+        if !matches!(self.entry.source, Source::Video(_)) {
+            return false;
+        }
+
+        let frame_duration = self
+            .animated_source
+            .as_ref()
+            .map(|source| source.frame_duration())
+            .unwrap_or(crate::source::DEFAULT_FRAME_DURATION);
+
+        let Some(layer_idx) = self
+            .layers
+            .iter()
+            .position(|layer| layer.layer.wl_surface() == surface)
+        else {
+            return false;
+        };
+
+        if self.layers[layer_idx]
+            .last_video_frame_draw
+            .is_some_and(|last_draw| last_draw.elapsed() < frame_duration)
+        {
+            self.layers[layer_idx]
+                .layer
+                .wl_surface()
+                .frame(&self.queue_handle, surface.clone());
+            surface.commit();
+            return true;
+        }
+
+        self.layers[layer_idx].needs_redraw = true;
+
+        match self.draw_layer_by_index(layer_idx, &mut None, Instant::now()) {
+            Ok(()) => {
+                self.layers[layer_idx].last_video_frame_draw = Some(Instant::now());
+            }
+            Err(DrawError::NoSource) => {
+                tracing::info!("No source for wallpaper");
+                self.layers[layer_idx]
+                    .layer
+                    .wl_surface()
+                    .frame(&self.queue_handle, surface.clone());
+                surface.commit();
+            }
+            Err(why) => {
+                tracing::error!(?why, "wallpaper could not be drawn");
+            }
+        }
+
+        true
+    }
+
     fn draw_layer_by_index(
         &mut self,
         layer_idx: usize,
-        cur_resized_img: &mut Option<DynamicImage>,
+        cur_resized_img: &mut Option<Arc<DynamicImage>>,
         start: Instant,
     ) -> Result<(), DrawError> {
         // Calculate dimensions first (immutable borrow)
@@ -232,21 +328,95 @@ impl Wallpaper {
             self.calculate_layer_dimensions(layer)?
         };
 
-        let needs_new_image = cur_resized_img
-            .as_ref()
-            .map_or(true, |img| img.width() != width || img.height() != height);
+        if !matches!(self.entry.source, Source::Video(_)) {
+            let needs_new_image = cur_resized_img
+                .as_ref()
+                .map_or(true, |img| img.width() != width || img.height() != height);
 
-        if needs_new_image {
-            *cur_resized_img = Some(self.prepare_scaled_image(width, height)?);
+            if needs_new_image {
+                *cur_resized_img = Some(self.prepare_scaled_image(width, height)?);
+            }
         }
+
+        let mut video_frame = None;
+        // Per-stage timing marks for video, used to attribute stutter to decode
+        // (frame pull) vs render (compose + buffer + commit). None for images.
+        let mut t_pulled = None;
+        if matches!(self.entry.source, Source::Video(_)) {
+            if let Some(animated_source) = self.animated_source.as_mut() {
+                match &self.entry.scaling_mode {
+                    ScalingMode::Stretch => animated_source.prepare(width, height),
+                    ScalingMode::Fit(_) | ScalingMode::FitBlur | ScalingMode::Zoom => {
+                        animated_source.prepare_unscaled()
+                    }
+                }
+                .map_err(|e| DrawError::ImageDecode {
+                    path: PathBuf::from("animated"),
+                    reason: format!("Failed to prepare animated source: {}", e),
+                })?;
+
+                let frame = animated_source.next_frame()
+                    .map_err(|e| DrawError::ImageDecode {
+                        path: PathBuf::from("animated"),
+                        reason: format!("Failed to get next frame: {}", e),
+                    })?;
+                video_frame = Some(frame);
+                t_pulled = Some(Instant::now());
+            }
+        }
+
+        let video_frame = video_frame
+            .map(|frame| {
+                self.prepare_video_frame(frame.payload, frame.is_placeholder, width, height)
+            })
+            .transpose()?;
+        let t_prepared = t_pulled.map(|_| Instant::now());
 
         // Now we can get mutable access to the layer
         let layer = self.layers.get_mut(layer_idx).ok_or(DrawError::NoSource)?;
         let pool = layer.pool.as_mut().ok_or(DrawError::NoSource)?;
 
-        let image = cur_resized_img.as_ref().expect("cur_resized_img was just set");
+        let buffer = if let Some(frame) = video_frame {
+            match frame {
+                PreparedVideoFrame::Bgrx {
+                    data,
+                    width,
+                    height,
+                    stride,
+                } => crate::draw::canvas_from_bgrx(pool, &data, width, height, stride)?,
+                PreparedVideoFrame::FitBlurBgrx {
+                    background,
+                    data,
+                    frame_width,
+                    frame_height,
+                    frame_stride,
+                    layer_width,
+                    layer_height,
+                } => crate::draw::canvas_from_fit_blur_bgrx_with_workspace(
+                    pool,
+                    &background,
+                    &data,
+                    frame_width,
+                    frame_height,
+                    frame_stride,
+                    layer_width,
+                    layer_height,
+                    &mut self.fit_blur_bgrx_workspace,
+                )?,
+                PreparedVideoFrame::Image(image) => crate::draw::canvas(
+                    pool,
+                    &image,
+                    width as i32,
+                    height as i32,
+                    width as i32 * 4,
+                )?,
+            }
+        } else {
+            let image = cur_resized_img.as_ref().expect("cur_resized_img was just set");
+            crate::draw::canvas(pool, image, width as i32, height as i32, width as i32 * 4)?
+        };
 
-        let buffer = crate::draw::canvas(pool, image, width as i32, height as i32, width as i32 * 4)?;
+        let t_buffer = t_pulled.map(|_| Instant::now());
 
         crate::draw::layer_surface(
             layer,
@@ -257,8 +427,23 @@ impl Wallpaper {
 
         layer.needs_redraw = false;
 
-        let elapsed = Instant::now().duration_since(start);
-        tracing::debug!(?elapsed, source = ?self.entry.source, "wallpaper draw");
+        let end = Instant::now();
+        let elapsed = end.duration_since(start);
+        if let (Some(pulled), Some(prepared), Some(buffer_done)) = (t_pulled, t_prepared, t_buffer) {
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+            tracing::debug!(
+                total_ms = ms(elapsed),
+                pull_ms = ms(pulled.duration_since(start)),
+                prepare_ms = ms(prepared.duration_since(pulled)),
+                buffer_ms = ms(buffer_done.duration_since(prepared)),
+                commit_ms = ms(end.duration_since(buffer_done)),
+                layer = ?(width, height),
+                scaling = ?self.entry.scaling_mode,
+                "video frame timing"
+            );
+        } else {
+            tracing::debug!(?elapsed, source = ?self.entry.source, "wallpaper draw");
+        }
 
         Ok(())
     }
@@ -276,17 +461,19 @@ impl Wallpaper {
         Ok((width, height))
     }
 
-    fn prepare_scaled_image(&mut self, width: u32, height: u32) -> Result<DynamicImage, DrawError> {
+    fn prepare_scaled_image(&mut self, width: u32, height: u32) -> Result<Arc<DynamicImage>, DrawError> {
         // Clone to avoid borrow conflicts when calling methods that mutate self
         let source = self.current_source.clone().ok_or(DrawError::NoSource)?;
 
         match source {
-            Source::Path(ref path) => self.scale_image_from_path(path, width, height),
+            Source::Path(ref path) => self
+                .scale_image_from_path(path, width, height)
+                .map(Arc::new),
             Source::Color(Color::Single([r, g, b])) => {
-                Ok(self.generate_solid_color([r, g, b], width, height))
+                Ok(Arc::new(self.generate_solid_color([r, g, b], width, height)))
             }
             Source::Color(Color::Gradient(ref gradient)) => {
-                self.generate_gradient(gradient, width, height)
+                self.generate_gradient(gradient, width, height).map(Arc::new)
             }
             Source::Shader(_) | Source::Video(_) | Source::Animated(_) => {
                 // Use persistent animated source
@@ -312,7 +499,13 @@ impl Wallpaper {
                         reason: format!("Failed to get next frame: {}", e),
                     })?;
 
-                Ok(frame.image)
+                match frame.payload {
+                    FramePayload::Image(image) => Ok(image),
+                    FramePayload::Bgrx { .. } => Err(DrawError::ImageDecode {
+                        path: PathBuf::from("animated"),
+                        reason: "Unexpected raw frame payload for image path".to_string(),
+                    }),
+                }
             }
         }
     }
@@ -351,11 +544,118 @@ impl Wallpaper {
     }
 
     fn apply_scaling_mode(&self, img: &DynamicImage, width: u32, height: u32) -> DynamicImage {
-        match self.entry.scaling_mode {
-            ScalingMode::Fit(color) => crate::scaler::fit(img, &color, width, height),
+        match &self.entry.scaling_mode {
+            ScalingMode::Fit(color) => crate::scaler::fit(img, color, width, height),
+            ScalingMode::FitBlur => crate::scaler::fit_blur(img, width, height),
             ScalingMode::Zoom => crate::scaler::zoom(img, width, height),
             ScalingMode::Stretch => crate::scaler::stretch(img, width, height),
         }
+    }
+
+    fn prepare_video_frame(
+        &mut self,
+        payload: FramePayload,
+        is_placeholder: bool,
+        width: u32,
+        height: u32,
+    ) -> Result<PreparedVideoFrame, DrawError> {
+        match payload {
+            FramePayload::Bgrx {
+                data,
+                width: frame_width,
+                height: frame_height,
+                stride,
+            } => {
+                if matches!(&self.entry.scaling_mode, ScalingMode::Stretch)
+                    && frame_width == width
+                    && frame_height == height
+                    && stride >= width as usize * 4
+                {
+                    return Ok(PreparedVideoFrame::Bgrx {
+                        data,
+                        width: frame_width,
+                        height: frame_height,
+                        stride,
+                    });
+                }
+
+                if matches!(&self.entry.scaling_mode, ScalingMode::FitBlur) {
+                    let background = self.prepare_fit_blur_video_bgrx_frame(
+                        &data,
+                        frame_width,
+                        frame_height,
+                        stride,
+                        is_placeholder,
+                        width,
+                        height,
+                    )?;
+                    return Ok(PreparedVideoFrame::FitBlurBgrx {
+                        background,
+                        data,
+                        frame_width,
+                        frame_height,
+                        frame_stride: stride,
+                        layer_width: width,
+                        layer_height: height,
+                    });
+                }
+
+                let image = bgrx_to_dynamic_image(&data, frame_width, frame_height, stride)?;
+                Ok(PreparedVideoFrame::Image(self.apply_scaling_mode(
+                    &image, width, height,
+                )))
+            }
+            FramePayload::Image(image) => {
+                if matches!(&self.entry.scaling_mode, ScalingMode::FitBlur) {
+                    return Ok(PreparedVideoFrame::Image(
+                        self.prepare_fit_blur_video_frame(&image, is_placeholder, width, height),
+                    ));
+                }
+
+                Ok(PreparedVideoFrame::Image(self.apply_scaling_mode(
+                    &image, width, height,
+                )))
+            }
+        }
+    }
+
+    fn prepare_fit_blur_video_frame(
+        &mut self,
+        image: &DynamicImage,
+        is_placeholder: bool,
+        width: u32,
+        height: u32,
+    ) -> DynamicImage {
+        prepare_fit_blur_video_frame_from_cache(
+            &mut self.fit_blur_background_cache,
+            image,
+            is_placeholder,
+            width,
+            height,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_fit_blur_video_bgrx_frame(
+        &mut self,
+        data: &[u8],
+        frame_width: u32,
+        frame_height: u32,
+        frame_stride: usize,
+        is_placeholder: bool,
+        width: u32,
+        height: u32,
+    ) -> Result<Arc<[u8]>, DrawError> {
+        prepare_fit_blur_video_bgrx_background_from_cache(
+            &mut self.fit_blur_background_cache,
+            data,
+            frame_width,
+            frame_height,
+            frame_stride,
+            is_placeholder,
+            width,
+            height,
+        )
     }
 
     fn generate_solid_color(&self, color: [f32; 3], width: u32, height: u32) -> DynamicImage {
@@ -540,6 +840,12 @@ impl Wallpaper {
             self.loop_handle.remove(token);
         }
 
+        // Video playback is paced by Wayland frame callbacks. Timer-driven
+        // redraws can race the compositor cadence and cause visible jitter.
+        if matches!(self.entry.source, Source::Video(_)) {
+            return;
+        }
+
         // Get frame duration from the animated source
         let frame_duration = self
             .animated_source
@@ -634,6 +940,7 @@ impl Wallpaper {
 
     fn clear_image(&mut self) {
         self.current_image = None;
+        self.fit_blur_background_cache.clear();
         for l in &mut self.layers {
             l.needs_redraw = true;
         }
@@ -654,6 +961,272 @@ fn current_image(output: &str) -> Option<Source> {
     };
 
     wallpaper.map(|(_name, path)| path)
+}
+
+fn bgrx_to_dynamic_image(
+    data: &[u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+) -> Result<DynamicImage, DrawError> {
+    let row_bytes = width as usize * 4;
+    if stride < row_bytes || data.len() < stride * height as usize {
+        return Err(DrawError::ImageDecode {
+            path: PathBuf::from("video"),
+            reason: "Invalid BGRx frame dimensions".to_string(),
+        });
+    }
+
+    let mut rgba = vec![0; row_bytes * height as usize];
+    for row in 0..height as usize {
+        let src_start = row * stride;
+        let src_row = &data[src_start..src_start + row_bytes];
+        let dst_start = row * row_bytes;
+        let dst_row = &mut rgba[dst_start..dst_start + row_bytes];
+
+        for (src, dst) in src_row.chunks_exact(4).zip(dst_row.chunks_exact_mut(4)) {
+            let [b, g, r, _x] = src else { unreachable!() };
+            dst.copy_from_slice(&[*r, *g, *b, 255]);
+        }
+    }
+
+    image::ImageBuffer::from_raw(width, height, rgba)
+        .map(DynamicImage::ImageRgba8)
+        .ok_or_else(|| DrawError::ImageDecode {
+            path: PathBuf::from("video"),
+            reason: "Failed to build image from BGRx frame".to_string(),
+        })
+}
+
+fn prepare_fit_blur_video_frame_from_cache(
+    fit_blur_background_cache: &mut Vec<FitBlurBackgroundCache>,
+    image: &DynamicImage,
+    is_placeholder: bool,
+    width: u32,
+    height: u32,
+) -> DynamicImage {
+    if is_placeholder {
+        let background = crate::scaler::fit_blur_background_fast(image, width, height);
+        return crate::scaler::compose_fit_blur(image, &background, width, height);
+    }
+
+    let background = fit_blur_background_from_cache(
+        fit_blur_background_cache,
+        image,
+        width,
+        height,
+    );
+    let background = bgrx_to_rgba_image(background, width, height)
+        .expect("cached fit-blur background dimensions are valid");
+    crate::scaler::compose_fit_blur(image, &background, width, height)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_fit_blur_video_bgrx_background_from_cache(
+    fit_blur_background_cache: &mut Vec<FitBlurBackgroundCache>,
+    data: &[u8],
+    frame_width: u32,
+    frame_height: u32,
+    frame_stride: usize,
+    is_placeholder: bool,
+    width: u32,
+    height: u32,
+) -> Result<Arc<[u8]>, DrawError> {
+    let row_bytes = frame_width as usize * 4;
+    if frame_stride < row_bytes || data.len() < frame_stride * frame_height as usize {
+        return Err(DrawError::ImageDecode {
+            path: PathBuf::from("video"),
+            reason: "Invalid BGRx frame dimensions".to_string(),
+        });
+    }
+
+    let frame_identity = (frame_width, frame_height);
+    if is_placeholder {
+        let image = bgrx_to_dynamic_image(data, frame_width, frame_height, frame_stride)?;
+        return Ok(fit_blur_background_bgrx_from_image(&image, width, height));
+    }
+
+    if let Some(index) = fit_blur_background_cache.iter().position(|cache| {
+        cache.layer_width == width
+            && cache.layer_height == height
+            && cache.frame_width == frame_identity.0
+            && cache.frame_height == frame_identity.1
+    }) {
+        let cache = &mut fit_blur_background_cache[index];
+        cache.frames_since_refresh += 1;
+        if cache.frames_since_refresh >= FIT_BLUR_BACKGROUND_REFRESH_FRAMES {
+            let image = bgrx_to_dynamic_image(data, frame_width, frame_height, frame_stride)?;
+            cache.background = fit_blur_background_bgrx_from_image(&image, width, height);
+            cache.frames_since_refresh = 0;
+        }
+        return Ok(Arc::clone(&fit_blur_background_cache[index].background));
+    }
+
+    let image = bgrx_to_dynamic_image(data, frame_width, frame_height, frame_stride)?;
+    fit_blur_background_cache.push(FitBlurBackgroundCache {
+        layer_width: width,
+        layer_height: height,
+        frame_width,
+        frame_height,
+        frames_since_refresh: 0,
+        background: fit_blur_background_bgrx_from_image(&image, width, height),
+    });
+
+    Ok(Arc::clone(
+        &fit_blur_background_cache
+            .last()
+            .expect("fit_blur_background_cache was just pushed")
+            .background,
+    ))
+}
+
+fn fit_blur_background_from_cache<'a>(
+    fit_blur_background_cache: &'a mut Vec<FitBlurBackgroundCache>,
+    image: &DynamicImage,
+    width: u32,
+    height: u32,
+) -> &'a [u8] {
+    let frame_width = image.width();
+    let frame_height = image.height();
+
+    if let Some(index) = fit_blur_background_cache.iter().position(|cache| {
+        cache.layer_width == width
+            && cache.layer_height == height
+            && cache.frame_width == frame_width
+            && cache.frame_height == frame_height
+    }) {
+        let cache = &mut fit_blur_background_cache[index];
+        cache.frames_since_refresh += 1;
+        if cache.frames_since_refresh >= FIT_BLUR_BACKGROUND_REFRESH_FRAMES {
+            cache.background = fit_blur_background_bgrx_from_image(image, width, height);
+            cache.frames_since_refresh = 0;
+        }
+        return &fit_blur_background_cache[index].background;
+    }
+
+    fit_blur_background_cache.push(FitBlurBackgroundCache {
+        layer_width: width,
+        layer_height: height,
+        frame_width,
+        frame_height,
+        frames_since_refresh: 0,
+        background: fit_blur_background_bgrx_from_image(image, width, height),
+    });
+
+    &fit_blur_background_cache
+        .last()
+        .expect("fit_blur_background_cache was just pushed")
+        .background
+}
+
+fn fit_blur_background_bgrx_from_image(image: &DynamicImage, width: u32, height: u32) -> Arc<[u8]> {
+    let background = crate::scaler::fit_blur_background_fast(image, width, height);
+    crate::scaler::fit_blur_background_to_bgrx(&background)
+}
+
+fn bgrx_to_rgba_image(data: &[u8], width: u32, height: u32) -> Option<image::RgbaImage> {
+    let row_bytes = width as usize * 4;
+    if data.len() < row_bytes * height as usize {
+        return None;
+    }
+
+    let mut rgba = Vec::with_capacity(row_bytes * height as usize);
+    for pixel in data[..row_bytes * height as usize].chunks_exact(4) {
+        let [b, g, r, _x] = pixel else { unreachable!() };
+        rgba.extend_from_slice(&[*r, *g, *b, 255]);
+    }
+
+    image::ImageBuffer::from_raw(width, height, rgba)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use image::{ImageBuffer, Rgba};
+
+    #[test]
+    fn fit_blur_placeholder_frame_does_not_populate_background_cache() {
+        let mut cache = Vec::new();
+        let placeholder = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+            320,
+            180,
+            Rgba([0, 0, 0, 255]),
+        ));
+        let real_frame = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+            320,
+            180,
+            Rgba([255, 0, 0, 255]),
+        ));
+
+        let _ = prepare_fit_blur_video_frame_from_cache(
+            &mut cache,
+            &placeholder,
+            true,
+            800,
+            600,
+        );
+        assert!(cache.is_empty());
+
+        let _ = prepare_fit_blur_video_frame_from_cache(
+            &mut cache,
+            &real_frame,
+            false,
+            800,
+            600,
+        );
+        assert_eq!(cache.len(), 1);
+    }
+
+    #[test]
+    fn fit_blur_real_frame_refreshes_cached_background_periodically() {
+        let mut cache = Vec::new();
+        let red_frame = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+            320,
+            180,
+            Rgba([255, 0, 0, 255]),
+        ));
+        let blue_frame = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(
+            320,
+            180,
+            Rgba([0, 0, 255, 255]),
+        ));
+
+        let first = prepare_fit_blur_video_frame_from_cache(
+            &mut cache,
+            &red_frame,
+            false,
+            800,
+            600,
+        )
+        .to_rgba8();
+        assert_eq!(first.get_pixel(400, 10).0, [255, 0, 0, 255]);
+
+        let stale_background = prepare_fit_blur_video_frame_from_cache(
+            &mut cache,
+            &blue_frame,
+            false,
+            800,
+            600,
+        )
+        .to_rgba8();
+        assert_eq!(stale_background.get_pixel(400, 10).0, [255, 0, 0, 255]);
+        assert_eq!(stale_background.get_pixel(400, 300).0, [0, 0, 255, 255]);
+
+        let mut refreshed_background = stale_background;
+        for _ in 1..FIT_BLUR_BACKGROUND_REFRESH_FRAMES {
+            refreshed_background = prepare_fit_blur_video_frame_from_cache(
+                &mut cache,
+                &blue_frame,
+                false,
+                800,
+                600,
+            )
+            .to_rgba8();
+        }
+
+        assert_eq!(refreshed_background.get_pixel(400, 10).0, [0, 0, 255, 255]);
+        assert_eq!(cache.len(), 1);
+    }
 }
 
 /// Decodes JPEG XL image files into `image::DynamicImage` via `jxl-oxide`.

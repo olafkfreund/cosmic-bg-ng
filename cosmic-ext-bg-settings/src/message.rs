@@ -88,6 +88,9 @@ pub enum Message {
     /// Video hardware acceleration changed
     VideoHwAccelChanged(bool),
 
+    /// Video FPS limit changed
+    VideoFpsChanged(Option<u32>),
+
     /// Animated image FPS limit changed
     AnimatedFpsChanged(Option<u32>),
 

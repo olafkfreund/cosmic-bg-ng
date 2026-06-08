@@ -5,7 +5,7 @@
 //! This module provides frame-by-frame playback of animated images,
 //! respecting per-frame delay timings for smooth animation.
 
-use crate::source::{Frame, SourceError, WallpaperSource};
+use crate::source::{Frame, FramePayload, SourceError, WallpaperSource};
 use cosmic_ext_bg_config::AnimatedConfig;
 use image::{codecs::gif::GifDecoder, AnimationDecoder, DynamicImage};
 use std::{
@@ -13,6 +13,7 @@ use std::{
     fs::File,
     io::BufReader,
     path::PathBuf,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -317,8 +318,9 @@ impl WallpaperSource for AnimatedSource {
             .ok_or_else(|| decode_error("No frames available", ""))?;
 
         Ok(Frame {
-            image: frame.image.clone(),
+            payload: FramePayload::Image(Arc::new(frame.image.clone())),
             timestamp: Instant::now(),
+            is_placeholder: false,
         })
     }
 

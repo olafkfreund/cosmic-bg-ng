@@ -41,6 +41,110 @@ pub fn canvas(
     Ok(buffer)
 }
 
+pub fn canvas_from_bgrx(
+    pool: &mut SlotPool,
+    data: &[u8],
+    width: u32,
+    height: u32,
+    source_stride: usize,
+) -> Result<Buffer, CreateBufferError> {
+    let stride = width as i32 * 4;
+    let (buffer, canvas) = pool.create_buffer(width as i32, height as i32, stride, wl_shm::Format::Xrgb8888)?;
+
+    copy_bgrx_to_xrgb8888(canvas, data, width as usize, height as usize, source_stride, stride as usize);
+
+    Ok(buffer)
+}
+
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+pub fn canvas_from_fit_blur_bgrx(
+    pool: &mut SlotPool,
+    background: &[u8],
+    frame: &[u8],
+    frame_width: u32,
+    frame_height: u32,
+    frame_stride: usize,
+    layer_width: u32,
+    layer_height: u32,
+) -> Result<Buffer, CreateBufferError> {
+    let stride = layer_width as i32 * 4;
+    let (buffer, canvas) = pool.create_buffer(
+        layer_width as i32,
+        layer_height as i32,
+        stride,
+        wl_shm::Format::Xrgb8888,
+    )?;
+
+    crate::scaler::compose_fit_blur_bgrx_to_canvas(
+        canvas,
+        stride as usize,
+        background,
+        frame,
+        frame_width,
+        frame_height,
+        frame_stride,
+        layer_width,
+        layer_height,
+    );
+
+    Ok(buffer)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn canvas_from_fit_blur_bgrx_with_workspace(
+    pool: &mut SlotPool,
+    background: &[u8],
+    frame: &[u8],
+    frame_width: u32,
+    frame_height: u32,
+    frame_stride: usize,
+    layer_width: u32,
+    layer_height: u32,
+    workspace: &mut crate::scaler::FitBlurBgrxWorkspace,
+) -> Result<Buffer, CreateBufferError> {
+    let stride = layer_width as i32 * 4;
+    let (buffer, canvas) = pool.create_buffer(
+        layer_width as i32,
+        layer_height as i32,
+        stride,
+        wl_shm::Format::Xrgb8888,
+    )?;
+
+    crate::scaler::compose_fit_blur_bgrx_to_canvas_with_workspace(
+        canvas,
+        stride as usize,
+        background,
+        frame,
+        frame_width,
+        frame_height,
+        frame_stride,
+        layer_width,
+        layer_height,
+        workspace,
+    );
+
+    Ok(buffer)
+}
+
+pub fn copy_bgrx_to_xrgb8888(
+    canvas: &mut [u8],
+    data: &[u8],
+    width: usize,
+    height: usize,
+    source_stride: usize,
+    dest_stride: usize,
+) {
+    let row_bytes = width * 4;
+    for row in 0..height {
+        let src_start = row * source_stride;
+        let src_end = src_start + row_bytes;
+        let dst_start = row * dest_stride;
+        let dst_end = dst_start + row_bytes;
+        canvas[dst_start..dst_end].copy_from_slice(&data[src_start..src_end]);
+    }
+}
+
 pub fn layer_surface(
     layer: &mut CosmicBgLayer,
     queue_handle: &QueueHandle<CosmicBg>,
@@ -103,6 +207,28 @@ pub fn xrgb888_canvas(canvas: &mut [u8], image: &DynamicImage) {
         "canvas too small: {} bytes for {}x{} image",
         canvas.len(), image.width(), image.height()
     );
+
+    if let Some(image) = image.as_rgba8() {
+        for (source, target) in image.as_raw().chunks_exact(4).zip(canvas.chunks_exact_mut(4)) {
+            let [r, g, b, _] = source else {
+                unreachable!("RGBA chunks are exactly 4 bytes");
+            };
+
+            target.copy_from_slice(&[*b, *g, *r, 0]);
+        }
+        return;
+    }
+
+    if let Some(image) = image.as_rgb8() {
+        for (source, target) in image.as_raw().chunks_exact(3).zip(canvas.chunks_exact_mut(4)) {
+            let [r, g, b] = source else {
+                unreachable!("RGB chunks are exactly 3 bytes");
+            };
+
+            target.copy_from_slice(&[*b, *g, *r, 0]);
+        }
+        return;
+    }
 
     for (pos, (_, _, pixel)) in image.pixels().enumerate() {
         let indice = pos * 4;

@@ -25,7 +25,7 @@ static SOURCE_TYPE_NAMES: &[&str] = &[
 ];
 
 /// Scaling mode dropdown options
-static SCALING_MODE_NAMES: &[&str] = &["Zoom (fill)", "Fit (letterbox)", "Stretch"];
+static SCALING_MODE_NAMES: &[&str] = &["Zoom (fill)", "Fit (letterbox)", "Stretch", "Fit blur"];
 
 /// Shader preset dropdown options
 static SHADER_PRESET_NAMES: &[&str] = &["Plasma", "Waves", "Gradient"];
@@ -49,6 +49,8 @@ pub struct WallpaperPage {
     pub video_speed: f64,
     /// Video hardware acceleration
     pub video_hw_accel: bool,
+    /// Video FPS limit
+    pub video_fps: Option<u32>,
     /// Animated FPS limit
     pub animated_fps: Option<u32>,
     /// Animated loop count
@@ -90,6 +92,7 @@ impl Default for WallpaperPage {
             video_loop: true,
             video_speed: 1.0,
             video_hw_accel: true,
+            video_fps: None,
             animated_fps: None,
             animated_loop_count: None,
             shader_fps: 30,
@@ -129,6 +132,7 @@ impl WallpaperPage {
             ScalingMode::Zoom => 0,
             ScalingMode::Fit(_) => 1,
             ScalingMode::Stretch => 2,
+            ScalingMode::FitBlur => 3,
         };
 
         match &entry.source {
@@ -144,6 +148,7 @@ impl WallpaperPage {
                 self.video_loop = config.loop_playback;
                 self.video_speed = config.playback_speed;
                 self.video_hw_accel = config.hw_accel;
+                self.video_fps = config.fps_limit.map(|fps| fps.clamp(1, 240));
             }
             Source::Animated(config) => {
                 self.source_type = SourceType::Animated;
@@ -201,6 +206,7 @@ impl WallpaperPage {
                 loop_playback: self.video_loop,
                 playback_speed: self.video_speed,
                 hw_accel: self.video_hw_accel,
+                fps_limit: self.video_fps,
             }),
             SourceType::Animated => Source::Animated(AnimatedConfig {
                 path: self.selected_path.clone().unwrap_or_default(),
@@ -358,6 +364,21 @@ impl WallpaperPage {
                 })
                 .width(Length::Fixed(80.0));
 
+            let fps_input = text_input(
+                "FPS",
+                self.video_fps.map(|f| f.to_string()).unwrap_or_default(),
+            )
+            .on_input(|s| {
+                if s.is_empty() {
+                    Message::VideoFpsChanged(None)
+                } else {
+                    s.parse::<u32>()
+                        .map(|v| Message::VideoFpsChanged(Some(v.clamp(1, 240))))
+                        .unwrap_or(Message::None)
+                }
+            })
+            .width(Length::Fixed(80.0));
+
             column()
                 .spacing(8)
                 .push(
@@ -367,6 +388,7 @@ impl WallpaperPage {
                         .push(toggler(self.video_loop).on_toggle(Message::VideoLoopChanged)),
                 )
                 .push(row().spacing(8).push(text::body("Speed:")).push(speed_input))
+                .push(row().spacing(8).push(text::body("FPS Limit:")).push(fps_input))
                 .push(
                     row()
                         .spacing(8)
@@ -430,6 +452,7 @@ impl WallpaperPage {
                     0 => ScalingMode::Zoom,
                     1 => ScalingMode::Fit([0.0, 0.0, 0.0]),
                     2 => ScalingMode::Stretch,
+                    3 => ScalingMode::FitBlur,
                     _ => ScalingMode::Zoom,
                 };
                 Message::ScalingModeChanged(mode)
