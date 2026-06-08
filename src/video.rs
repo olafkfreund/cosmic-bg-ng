@@ -689,14 +689,11 @@ fn ffmpeg_args(config: &VideoConfig, target_size: Option<(u32, u32)>) -> Vec<OsS
         OsString::from("error"),
     ];
 
-    // Enable hardware-accelerated decode when requested. `auto` lets ffmpeg pick
-    // an available method (VA-API, NVDEC, etc.) and transparently falls back to
-    // software decode when none is usable, so it is safe to pass unconditionally
-    // when hw_accel is on. Decoded frames stay in system memory (no
-    // hwaccel_output_format), keeping the downstream rawvideo pipe unchanged.
-    if config.hw_accel {
-        args.extend([OsString::from("-hwaccel"), OsString::from("auto")]);
-    }
+    // Note: ffmpeg's native software H.264/AV1 decoders are used deliberately.
+    // Benchmarking 4K H.264 showed `-hwaccel auto` was slower end-to-end than
+    // software decode here because the GPU->system-memory frame download costs
+    // more than it saves for the rawvideo pipe. Software decode already sustains
+    // well above real-time, so the bottleneck is not decode.
 
     if config.loop_playback {
         args.extend([OsString::from("-stream_loop"), OsString::from("-1")]);
@@ -1172,35 +1169,6 @@ mod tests {
 
         assert!(re_index < input_index);
         assert_eq!(args.get(input_index + 1).map(OsString::as_os_str), Some(path.as_os_str()));
-    }
-
-    #[test]
-    fn test_ffmpeg_args_enable_hwaccel_when_requested_before_input() {
-        let config = VideoConfig {
-            path: PathBuf::from("/tmp/video.mp4"),
-            hw_accel: true,
-            ..Default::default()
-        };
-
-        let args = ffmpeg_args(&config, None);
-
-        assert!(os_args_contain_pair(&args, "-hwaccel", "auto"));
-        let hwaccel_index = os_args_position(&args, "-hwaccel").unwrap();
-        let input_index = os_args_position(&args, "-i").unwrap();
-        assert!(hwaccel_index < input_index);
-    }
-
-    #[test]
-    fn test_ffmpeg_args_omit_hwaccel_when_disabled() {
-        let config = VideoConfig {
-            path: PathBuf::from("/tmp/video.mp4"),
-            hw_accel: false,
-            ..Default::default()
-        };
-
-        let args = ffmpeg_args(&config, None);
-
-        assert!(!os_args_contain(&args, "-hwaccel"));
     }
 
     #[test]
