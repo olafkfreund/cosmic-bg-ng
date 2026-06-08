@@ -823,10 +823,26 @@ fn read_ffmpeg_frames(
     latest_frame: Arc<Mutex<Option<Arc<[u8]>>>>,
     ended: Arc<AtomicBool>,
 ) {
+    let mut produced: u64 = 0;
+    let mut window_start = Instant::now();
     loop {
         let mut frame = vec![0; frame_size];
         if stdout.read_exact(&mut frame).is_err() {
             break;
+        }
+        produced += 1;
+        // Report the real decode + pipe throughput periodically so we can tell a
+        // decode/pipe bottleneck (low produced fps) from a render bottleneck.
+        if produced % 48 == 0 {
+            let elapsed = window_start.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                tracing::debug!(
+                    produced_fps = 48.0 / elapsed,
+                    frame_bytes = frame_size,
+                    "ffmpeg decode throughput"
+                );
+            }
+            window_start = Instant::now();
         }
         let Ok(mut latest) = latest_frame.lock() else {
             break;

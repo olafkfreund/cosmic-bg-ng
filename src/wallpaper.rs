@@ -339,6 +339,9 @@ impl Wallpaper {
         }
 
         let mut video_frame = None;
+        // Per-stage timing marks for video, used to attribute stutter to decode
+        // (frame pull) vs render (compose + buffer + commit). None for images.
+        let mut t_pulled = None;
         if matches!(self.entry.source, Source::Video(_)) {
             if let Some(animated_source) = self.animated_source.as_mut() {
                 match &self.entry.scaling_mode {
@@ -358,6 +361,7 @@ impl Wallpaper {
                         reason: format!("Failed to get next frame: {}", e),
                     })?;
                 video_frame = Some(frame);
+                t_pulled = Some(Instant::now());
             }
         }
 
@@ -366,6 +370,7 @@ impl Wallpaper {
                 self.prepare_video_frame(frame.payload, frame.is_placeholder, width, height)
             })
             .transpose()?;
+        let t_prepared = t_pulled.map(|_| Instant::now());
 
         // Now we can get mutable access to the layer
         let layer = self.layers.get_mut(layer_idx).ok_or(DrawError::NoSource)?;
@@ -411,6 +416,8 @@ impl Wallpaper {
             crate::draw::canvas(pool, image, width as i32, height as i32, width as i32 * 4)?
         };
 
+        let t_buffer = t_pulled.map(|_| Instant::now());
+
         crate::draw::layer_surface(
             layer,
             &self.queue_handle,
@@ -420,8 +427,23 @@ impl Wallpaper {
 
         layer.needs_redraw = false;
 
-        let elapsed = Instant::now().duration_since(start);
-        tracing::debug!(?elapsed, source = ?self.entry.source, "wallpaper draw");
+        let end = Instant::now();
+        let elapsed = end.duration_since(start);
+        if let (Some(pulled), Some(prepared), Some(buffer_done)) = (t_pulled, t_prepared, t_buffer) {
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+            tracing::debug!(
+                total_ms = ms(elapsed),
+                pull_ms = ms(pulled.duration_since(start)),
+                prepare_ms = ms(prepared.duration_since(pulled)),
+                buffer_ms = ms(buffer_done.duration_since(prepared)),
+                commit_ms = ms(end.duration_since(buffer_done)),
+                layer = ?(width, height),
+                scaling = ?self.entry.scaling_mode,
+                "video frame timing"
+            );
+        } else {
+            tracing::debug!(?elapsed, source = ?self.entry.source, "wallpaper draw");
+        }
 
         Ok(())
     }
