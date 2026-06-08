@@ -426,6 +426,7 @@ impl WallpaperSource for ShaderSource {
         Ok(Frame {
             payload: FramePayload::Image(Arc::new(image)),
             timestamp: Instant::now(),
+            is_placeholder: false,
         })
     }
 

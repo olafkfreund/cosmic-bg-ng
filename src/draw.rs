@@ -56,6 +56,77 @@ pub fn canvas_from_bgrx(
     Ok(buffer)
 }
 
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+pub fn canvas_from_fit_blur_bgrx(
+    pool: &mut SlotPool,
+    background: &[u8],
+    frame: &[u8],
+    frame_width: u32,
+    frame_height: u32,
+    frame_stride: usize,
+    layer_width: u32,
+    layer_height: u32,
+) -> Result<Buffer, CreateBufferError> {
+    let stride = layer_width as i32 * 4;
+    let (buffer, canvas) = pool.create_buffer(
+        layer_width as i32,
+        layer_height as i32,
+        stride,
+        wl_shm::Format::Xrgb8888,
+    )?;
+
+    crate::scaler::compose_fit_blur_bgrx_to_canvas(
+        canvas,
+        stride as usize,
+        background,
+        frame,
+        frame_width,
+        frame_height,
+        frame_stride,
+        layer_width,
+        layer_height,
+    );
+
+    Ok(buffer)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn canvas_from_fit_blur_bgrx_with_workspace(
+    pool: &mut SlotPool,
+    background: &[u8],
+    frame: &[u8],
+    frame_width: u32,
+    frame_height: u32,
+    frame_stride: usize,
+    layer_width: u32,
+    layer_height: u32,
+    workspace: &mut crate::scaler::FitBlurBgrxWorkspace,
+) -> Result<Buffer, CreateBufferError> {
+    let stride = layer_width as i32 * 4;
+    let (buffer, canvas) = pool.create_buffer(
+        layer_width as i32,
+        layer_height as i32,
+        stride,
+        wl_shm::Format::Xrgb8888,
+    )?;
+
+    crate::scaler::compose_fit_blur_bgrx_to_canvas_with_workspace(
+        canvas,
+        stride as usize,
+        background,
+        frame,
+        frame_width,
+        frame_height,
+        frame_stride,
+        layer_width,
+        layer_height,
+        workspace,
+    );
+
+    Ok(buffer)
+}
+
 pub fn copy_bgrx_to_xrgb8888(
     canvas: &mut [u8],
     data: &[u8],

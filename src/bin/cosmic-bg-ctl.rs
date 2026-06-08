@@ -60,6 +60,9 @@ enum Commands {
         /// Target FPS limit (default: 60)
         #[arg(long)]
         fps: Option<u32>,
+        /// Scaling mode: stretch, zoom, fit, fit-blur
+        #[arg(long, default_value = "stretch")]
+        scaling: String,
     },
 
     /// Set an animated image wallpaper (GIF, WebP, APNG)
@@ -166,7 +169,8 @@ fn run(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
             speed,
             no_hw_accel,
             fps,
-        } => cmd_video(&context, path, output, r#loop, speed, no_hw_accel, fps),
+            scaling,
+        } => cmd_video(&context, path, output, r#loop, speed, no_hw_accel, fps, &scaling),
         Commands::Animated {
             path,
             output,
@@ -197,7 +201,10 @@ fn parse_scaling_mode(scaling: &str) -> Result<ScalingMode, Box<dyn std::error::
         "zoom" => Ok(ScalingMode::Zoom),
         "stretch" => Ok(ScalingMode::Stretch),
         "fit" => Ok(ScalingMode::Fit([0.0, 0.0, 0.0])), // Black background
-        _ => Err(format!("Unknown scaling mode: {scaling}. Use: zoom, fit, stretch").into()),
+        "fit-blur" => Ok(ScalingMode::FitBlur),
+        _ => Err(
+            format!("Unknown scaling mode: {scaling}. Use: zoom, fit, stretch, fit-blur").into(),
+        ),
     }
 }
 
@@ -251,6 +258,7 @@ fn cmd_video(
     speed: Option<f64>,
     no_hw_accel: bool,
     fps: Option<u32>,
+    scaling: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let path = path.canonicalize().map_err(|e| format!("Invalid path: {e}"))?;
 
@@ -260,6 +268,7 @@ fn cmd_video(
 
     let output_name = output.unwrap_or_else(|| "all".to_string());
     let fps = fps.map(|f| f.clamp(1, 240));
+    let scaling_mode = parse_scaling_mode(scaling)?;
 
     let video_config = VideoConfig {
         path: path.clone(),
@@ -269,7 +278,8 @@ fn cmd_video(
         fps_limit: fps,
     };
 
-    let entry = Entry::new(output_name.clone(), Source::Video(video_config));
+    let mut entry = Entry::new(output_name.clone(), Source::Video(video_config));
+    entry.scaling_mode = scaling_mode;
 
     let mut config = cosmic_ext_bg_config::Config::load(context)?;
     config.set_entry(context, entry)?;
@@ -287,6 +297,7 @@ fn cmd_video(
     if let Some(f) = fps {
         println!("  FPS limit: {f}");
     }
+    println!("  Scaling: {scaling}");
     Ok(())
 }
 
@@ -627,4 +638,25 @@ fn cmd_restore(
 
     println!("Configuration restored from: {}", backup_file.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_video_scaling_modes() {
+        assert_eq!(parse_scaling_mode("stretch").unwrap(), ScalingMode::Stretch);
+        assert_eq!(parse_scaling_mode("zoom").unwrap(), ScalingMode::Zoom);
+        assert_eq!(
+            parse_scaling_mode("fit").unwrap(),
+            ScalingMode::Fit([0.0, 0.0, 0.0])
+        );
+        assert_eq!(parse_scaling_mode("fit-blur").unwrap(), ScalingMode::FitBlur);
+    }
+
+    #[test]
+    fn rejects_unknown_scaling_mode() {
+        assert!(parse_scaling_mode("contain").is_err());
+    }
 }

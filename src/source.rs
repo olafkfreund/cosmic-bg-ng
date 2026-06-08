@@ -29,6 +29,7 @@ pub const FALLBACK_RESOLUTION: (u32, u32) = (1920, 1080);
 pub struct Frame {
     pub payload: FramePayload,
     pub timestamp: Instant,
+    pub is_placeholder: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -47,6 +48,15 @@ impl Frame {
         Self {
             payload: FramePayload::Image(image),
             timestamp: Instant::now(),
+            is_placeholder: false,
+        }
+    }
+
+    pub fn placeholder(payload: FramePayload) -> Self {
+        Self {
+            payload,
+            timestamp: Instant::now(),
+            is_placeholder: true,
         }
     }
 }
@@ -86,6 +96,11 @@ pub trait WallpaperSource: Send + Sync {
     /// Prepare source for rendering at given dimensions
     /// This is called when the output size changes
     fn prepare(&mut self, width: u32, height: u32) -> Result<(), SourceError>;
+
+    /// Prepare source without forcing decoded frames to the output dimensions.
+    fn prepare_unscaled(&mut self) -> Result<(), SourceError> {
+        self.prepare(FALLBACK_RESOLUTION.0, FALLBACK_RESOLUTION.1)
+    }
 
     /// Release resources when no longer needed
     fn release(&mut self);
@@ -137,6 +152,7 @@ impl WallpaperSource for StaticSource {
         Ok(Frame {
             payload: FramePayload::Image(Arc::new(self.cached_image.as_ref().unwrap().clone())),
             timestamp: Instant::now(),
+            is_placeholder: false,
         })
     }
 
@@ -212,6 +228,7 @@ impl WallpaperSource for ColorSource {
         Ok(Frame {
             payload: FramePayload::Image(Arc::new(self.generated.as_ref().unwrap().clone())),
             timestamp: Instant::now(),
+            is_placeholder: false,
         })
     }
 

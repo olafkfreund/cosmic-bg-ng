@@ -327,6 +327,8 @@ pub enum SamplingMethod {
 pub enum ScalingMode {
     // Fit the image and fill the rest of the area with the given RGB color
     Fit([f32; 3]),
+    /// Fit the image and fill the rest of the area with a blurred cover-scaled copy
+    FitBlur,
     /// Stretch the image ignoring any aspect ratio to fit the area
     Stretch,
     /// Zoom the image so that it fill the whole area

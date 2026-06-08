@@ -320,6 +320,7 @@ impl WallpaperSource for AnimatedSource {
         Ok(Frame {
             payload: FramePayload::Image(Arc::new(frame.image.clone())),
             timestamp: Instant::now(),
+            is_placeholder: false,
         })
     }
 

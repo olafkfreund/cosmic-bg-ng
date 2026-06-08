@@ -25,7 +25,7 @@ static SOURCE_TYPE_NAMES: &[&str] = &[
 ];
 
 /// Scaling mode dropdown options
-static SCALING_MODE_NAMES: &[&str] = &["Zoom (fill)", "Fit (letterbox)", "Stretch"];
+static SCALING_MODE_NAMES: &[&str] = &["Zoom (fill)", "Fit (letterbox)", "Stretch", "Fit blur"];
 
 /// Shader preset dropdown options
 static SHADER_PRESET_NAMES: &[&str] = &["Plasma", "Waves", "Gradient"];
@@ -132,6 +132,7 @@ impl WallpaperPage {
             ScalingMode::Zoom => 0,
             ScalingMode::Fit(_) => 1,
             ScalingMode::Stretch => 2,
+            ScalingMode::FitBlur => 3,
         };
 
         match &entry.source {
@@ -451,6 +452,7 @@ impl WallpaperPage {
                     0 => ScalingMode::Zoom,
                     1 => ScalingMode::Fit([0.0, 0.0, 0.0]),
                     2 => ScalingMode::Stretch,
+                    3 => ScalingMode::FitBlur,
                     _ => ScalingMode::Zoom,
                 };
                 Message::ScalingModeChanged(mode)
