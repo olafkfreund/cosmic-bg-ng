@@ -213,15 +213,11 @@ pub fn compose_fit_blur_bgrx_to_canvas_with_workspace(
         return;
     }
 
-    for row in 0..layer_height_usize {
-        let dst_start = row * canvas_stride;
-        let src_start = row * layer_row_bytes;
-        canvas[dst_start..dst_start + layer_row_bytes]
-            .copy_from_slice(&background[src_start..src_start + layer_row_bytes]);
-    }
-
     if frame_width == 0 || frame_height == 0 || layer_width == 0 || layer_height == 0 {
         tracing::warn!("Invalid fit-blur BGRx foreground dimensions");
+        // Fill with the blurred background so the surface is never left with
+        // uninitialized (recycled) buffer contents.
+        copy_background_to_canvas(canvas, canvas_stride, background, layer_row_bytes, layer_height_usize);
         return;
     }
 
@@ -231,15 +227,55 @@ pub fn compose_fit_blur_bgrx_to_canvas_with_workspace(
         layer_width,
         layer_height,
     );
-    let foreground = resize_bgrx(
-        frame,
-        frame_width,
-        frame_height,
-        frame_stride,
-        foreground_width,
-        foreground_height,
-        workspace,
-    );
+
+    let foreground_row_bytes = foreground_width as usize * 4;
+    let covers_layer = foreground_width == layer_width && foreground_height == layer_height;
+    let identity_scale = foreground_width == frame_width && foreground_height == frame_height;
+
+    // Fast path: the fitted video fills the whole layer at native resolution.
+    // The blurred background is then fully hidden and the foreground needs no
+    // rescale, so a single per-row copy replaces the full-screen background
+    // fill, the identity resize, and the per-pixel feathered overlay. This is
+    // the common case for full-screen-aspect video (e.g. a 16:9 clip on a 16:9
+    // output) and removes ~3 full-frame passes plus the resampler per frame.
+    if covers_layer
+        && identity_scale
+        && copy_bgrx_frame_to_canvas(
+            canvas,
+            canvas_stride,
+            frame,
+            frame_width,
+            frame_height,
+            frame_stride,
+        )
+    {
+        return;
+    }
+
+    // The blurred background is only visible where the foreground does not cover
+    // the layer, so skip the full-screen copy when the foreground fills it.
+    if !covers_layer {
+        copy_background_to_canvas(canvas, canvas_stride, background, layer_row_bytes, layer_height_usize);
+    }
+
+    // Skip the resampler when the foreground is already at native size; the raw
+    // BGRx frame can be overlaid directly.
+    let foreground: &[u8] = if identity_scale
+        && frame_stride == foreground_row_bytes
+        && frame.len() >= foreground_row_bytes * foreground_height as usize
+    {
+        &frame[..foreground_row_bytes * foreground_height as usize]
+    } else {
+        resize_bgrx(
+            frame,
+            frame_width,
+            frame_height,
+            frame_stride,
+            foreground_width,
+            foreground_height,
+            workspace,
+        )
+    };
     let foreground_x = (layer_width - foreground_width) / 2;
     let foreground_y = (layer_height - foreground_height) / 2;
 
@@ -268,6 +304,60 @@ fn fit_blur_foreground_size(
         (frame_width as f64 * ratio).round() as u32,
         (frame_height as f64 * ratio).round() as u32,
     )
+}
+
+/// Copies the full-screen blurred background into the canvas, honouring the
+/// canvas stride. The background is stored tightly packed at `layer_row_bytes`.
+fn copy_background_to_canvas(
+    canvas: &mut [u8],
+    canvas_stride: usize,
+    background: &[u8],
+    layer_row_bytes: usize,
+    layer_height: usize,
+) {
+    for row in 0..layer_height {
+        let dst_start = row * canvas_stride;
+        let src_start = row * layer_row_bytes;
+        canvas[dst_start..dst_start + layer_row_bytes]
+            .copy_from_slice(&background[src_start..src_start + layer_row_bytes]);
+    }
+}
+
+/// Copies a native-resolution BGRx frame straight into the XRGB8888 canvas, one
+/// row at a time to honour differing source/destination strides. BGRx and
+/// XRGB8888 share byte layout, so no per-pixel conversion is needed. Returns
+/// `false` without touching the canvas when the frame buffer is too small, so
+/// the caller can fall back to the full compositing path.
+fn copy_bgrx_frame_to_canvas(
+    canvas: &mut [u8],
+    canvas_stride: usize,
+    frame: &[u8],
+    frame_width: u32,
+    frame_height: u32,
+    frame_stride: usize,
+) -> bool {
+    let row_bytes = frame_width as usize * 4;
+    let height = frame_height as usize;
+    if frame_stride < row_bytes {
+        return false;
+    }
+    let (Some(required_src), Some(required_dst)) = (
+        required_len(frame_stride, height, row_bytes),
+        required_len(canvas_stride, height, row_bytes),
+    ) else {
+        return false;
+    };
+    if frame.len() < required_src || canvas.len() < required_dst {
+        return false;
+    }
+
+    for row in 0..height {
+        let src_start = row * frame_stride;
+        let dst_start = row * canvas_stride;
+        canvas[dst_start..dst_start + row_bytes]
+            .copy_from_slice(&frame[src_start..src_start + row_bytes]);
+    }
+    true
 }
 
 fn resize_bgrx<'a>(
@@ -793,6 +883,77 @@ mod tests {
         assert!(canvas_b[center_b + 2] > 0);
         assert_eq!(canvas_b[center_b + 3], 0);
         assert_eq!(&canvas_b[..4], &[0, 255, 0, 0]);
+    }
+
+    #[test]
+    fn compose_fit_blur_bgrx_full_cover_copies_frame_without_background_or_feather() {
+        let mut workspace = FitBlurBgrxWorkspace::default();
+
+        // Layer and frame are identical 4x2 BGRx buffers, so the fitted video
+        // fills the whole layer at native resolution (the fast path).
+        let layer_width = 4u32;
+        let layer_height = 2u32;
+        let row_bytes = layer_width as usize * 4;
+        let pixels = layer_width as usize * layer_height as usize;
+
+        // A distinctive background that must NOT appear anywhere if the fast
+        // path skips both the background fill and the feathered overlay.
+        let background: Vec<u8> = [255, 0, 0, 0].repeat(pixels);
+        let frame: Vec<u8> = [7, 8, 9, 0].repeat(pixels);
+        let mut canvas = vec![0u8; row_bytes * layer_height as usize];
+
+        compose_fit_blur_bgrx_to_canvas_with_workspace(
+            &mut canvas,
+            row_bytes,
+            &background,
+            &frame,
+            layer_width,
+            layer_height,
+            row_bytes,
+            layer_width,
+            layer_height,
+            &mut workspace,
+        );
+
+        // Every pixel — including the corners the feather would otherwise blend
+        // with the red background — equals the source frame untouched.
+        assert_eq!(canvas, frame);
+    }
+
+    #[test]
+    fn compose_fit_blur_bgrx_full_cover_honours_canvas_stride() {
+        let mut workspace = FitBlurBgrxWorkspace::default();
+
+        // Same full-cover fast path, but with canvas padding (stride larger than
+        // the visible row) to ensure the per-row copy respects the stride.
+        let layer_width = 4u32;
+        let layer_height = 2u32;
+        let row_bytes = layer_width as usize * 4;
+        let canvas_stride = row_bytes + 8;
+        let pixels = layer_width as usize * layer_height as usize;
+
+        let background: Vec<u8> = [255, 0, 0, 0].repeat(pixels);
+        let frame: Vec<u8> = [7, 8, 9, 0].repeat(pixels);
+        let mut canvas = vec![0u8; canvas_stride * layer_height as usize];
+
+        compose_fit_blur_bgrx_to_canvas_with_workspace(
+            &mut canvas,
+            canvas_stride,
+            &background,
+            &frame,
+            layer_width,
+            layer_height,
+            row_bytes,
+            layer_width,
+            layer_height,
+            &mut workspace,
+        );
+
+        for row in 0..layer_height as usize {
+            let dst = row * canvas_stride;
+            let src = row * row_bytes;
+            assert_eq!(&canvas[dst..dst + row_bytes], &frame[src..src + row_bytes]);
+        }
     }
 
     #[test]
