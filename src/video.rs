@@ -814,6 +814,17 @@ fn adjusted_frame_duration(config: &VideoConfig, source_frame_duration: Duration
     Duration::from_secs_f64((base.as_secs_f64() / speed).max(0.001))
 }
 
+/// Returns a uniquely-owned, writable view into `slot`, recycling its existing
+/// allocation when no other reference is alive. When a consumer still holds the
+/// previous frame (the published clone has not been dropped yet) the buffer is
+/// replaced with a fresh allocation so we never clobber data still being read.
+fn writable_frame_buffer(slot: &mut Arc<[u8]>, frame_size: usize) -> &mut [u8] {
+    if Arc::get_mut(slot).is_none() {
+        *slot = Arc::from(vec![0u8; frame_size]);
+    }
+    Arc::get_mut(slot).expect("freshly created Arc is uniquely owned")
+}
+
 fn read_ffmpeg_frames(
     mut stdout: impl Read,
     frame_size: usize,
@@ -822,9 +833,14 @@ fn read_ffmpeg_frames(
 ) {
     let mut produced: u64 = 0;
     let mut window_start = Instant::now();
+    // Reusable frame buffer. We publish a *clone* of `slot` so the producer keeps
+    // ownership; on the next iteration `writable_frame_buffer` writes straight back
+    // into it whenever no consumer still references it. For a 4K frame this avoids a
+    // fresh ~33MB allocation + zero-fill + copy per frame (glibc mmap/munmap churn).
+    let mut slot: Arc<[u8]> = Arc::from(vec![0u8; frame_size]);
     loop {
-        let mut frame = vec![0; frame_size];
-        if stdout.read_exact(&mut frame).is_err() {
+        let writable = writable_frame_buffer(&mut slot, frame_size);
+        if stdout.read_exact(writable).is_err() {
             break;
         }
         produced += 1;
@@ -844,7 +860,9 @@ fn read_ffmpeg_frames(
         let Ok(mut latest) = latest_frame.lock() else {
             break;
         };
-        *latest = Some(Arc::<[u8]>::from(frame));
+        // Cheap publish: bumps the refcount, no data copy. Retaining `slot` lets the
+        // next iteration recycle this allocation once readers drop their clones.
+        *latest = Some(Arc::clone(&slot));
     }
     ended.store(true, Ordering::Release);
 }
@@ -1215,6 +1233,32 @@ mod tests {
         let latest = read_ffmpeg_frames_for_test(&[b"old1", b"new2", b"last"], 4).unwrap();
 
         assert_eq!(latest, b"last");
+    }
+
+    #[test]
+    fn writable_frame_buffer_recycles_when_unique() {
+        let mut slot: Arc<[u8]> = Arc::from(vec![0u8; 4]);
+        let ptr_before = slot.as_ptr();
+
+        writable_frame_buffer(&mut slot, 4).copy_from_slice(b"abcd");
+
+        // No other reference alive -> same allocation is reused (no churn).
+        assert_eq!(slot.as_ptr(), ptr_before);
+        assert_eq!(&*slot, b"abcd");
+    }
+
+    #[test]
+    fn writable_frame_buffer_allocates_when_shared() {
+        let mut slot: Arc<[u8]> = Arc::from(vec![1u8; 4]);
+        let held = Arc::clone(&slot); // simulate a consumer still holding the frame
+        let ptr_before = slot.as_ptr();
+
+        writable_frame_buffer(&mut slot, 4).copy_from_slice(b"wxyz");
+
+        // Shared -> a fresh buffer is allocated and the held frame is left intact.
+        assert_ne!(slot.as_ptr(), ptr_before);
+        assert_eq!(&*held, &[1u8; 4]);
+        assert_eq!(&*slot, b"wxyz");
     }
 
     #[test]
